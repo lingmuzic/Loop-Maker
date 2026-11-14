@@ -90,6 +90,10 @@ class ProcessResult:
     # source, or None for the standard midpoint loop.
     variation: int | None = None
     split_s: float | None = None
+    # Middle seam: crossfade centre level vs. its surroundings, and the
+    # combined 0-100 seam score (see quality.seam_score).
+    crossfade_level_db: float = 0.0
+    seam_score: int = 100
     notes: list[str] = field(default_factory=list)
 
     def format(self) -> str:
@@ -111,6 +115,8 @@ class ProcessResult:
         if self.normalization is not None:
             lines.append(self.normalization.format())
         lines.append(self.quality.format())
+        lines.append(f"  Crossfade centre level {self.crossfade_level_db:+.2f} dB vs. surroundings; "
+                     f"seam score {self.seam_score}/100")
         lines += [f"  NOTE: {note}" for note in self.notes]
         return "\n".join(lines)
 
@@ -229,6 +235,9 @@ def process_file(
         # Compare against the original at the *same* gain, i.e. before
         # normalisation (gain doesn't change smoothness).
         report = quality.compare(data, looped, sample_rate, settings.report_window_ms)
+        # The output is B | A; the crossfade ends where B's full length ends.
+        second_half_len = frames - (frames // 2 if split is None else split)
+        xfade_db = quality.crossfade_level_db(looped, second_half_len - xfade_len, xfade_len)
 
         # Loudness is measured on the finished loop: exactly what will play.
         normalization = None
@@ -244,8 +253,6 @@ def process_file(
             output_path, looped, sample_rate, out_subtype, spec.file_format, dither, _dither_rng(output_path)
         )
 
-        # The output is B | A; the crossfade ends where B's full length ends.
-        second_half_len = frames - (frames // 2 if split is None else split)
         result.outputs.append(
             ProcessResult(
                 input_path=input_path,
@@ -268,6 +275,8 @@ def process_file(
                 normalization=normalization,
                 variation=None if split is None else number,
                 split_s=None if split is None else split / sample_rate,
+                crossfade_level_db=xfade_db,
+                seam_score=quality.seam_score(report.after, xfade_db),
                 notes=notes,
             )
         )

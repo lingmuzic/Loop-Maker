@@ -1,24 +1,26 @@
-"""Small Tkinter front-end. Run with ``python -m loopmaker.gui``.
+"""Loop Maker main window. Run with ``python -m loopmaker.gui``.
 
-The GUI is deliberately thin: it collects settings, calls the same
-``pipeline.process_batch`` the CLI uses, and shows the results. Waveform
-peaks and loop playback come from ``preview`` (also UI-free).
+The GUI is deliberately thin. It collects settings and per-file overrides,
+then uses the same UI-free modules as the CLI:
+
+* ``batch.validate_batch``  live per-file validation (re-run on every change)
+* ``batch.run_batch``       processing with the "On problem" policy + report
+* ``preview``               waveform peaks and loop playback (via gui_playback)
 
 Window layout, top to bottom:
-    Input files  ->  Settings  ->  Process  ->  Test playback  ->  Log
+    Files (table) -> Settings -> summary + Process -> Test playback -> Log
 
-Threading: processing runs on a worker thread so the window stays responsive.
-The worker never touches widgets (Tkinter is not thread-safe); it posts
-messages to a queue that the Tk main loop drains every 100 ms.
+Threading: processing runs on a worker thread so the window stays
+responsive. The worker never touches widgets (Tkinter is not thread-safe);
+it posts messages to a queue that the Tk main loop drains every 100 ms.
 
 Optional extras, each degrading gracefully when missing:
-- ``tkinterdnd2``: drag-and-drop onto the file list
-- ``sounddevice``: playback in the Test playback area
+- ``tkinterdnd2``: drag-and-drop onto the file table
+- ``sounddevice``: playback in the Test playback panel
 """
 
 from __future__ import annotations
 
-import os
 import queue
 import threading
 import tkinter as tk
@@ -26,7 +28,9 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from . import APP_NAME, audio_io, core, loudness, naming, pipeline, presets, preview, variations
+from . import APP_NAME, audio_io, batch, core, loudness, naming, pipeline, presets, variations
+from .gui_playback import PlaybackPanel
+from .gui_table import STATUS_COLOURS, FileTable
 
 try:  # Optional dependency: drag-and-drop support.
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -37,101 +41,96 @@ _AUDIO_FILETYPES = [
     ("Audio files", " ".join(f"*{ext}" for ext in audio_io.SUPPORTED_EXTENSIONS)),
     ("All files", "*.*"),
 ]
-
-# Waveform colours (light surface, blue wave, orange crossfade highlight).
-WAVE_BG = "#fcfcfb"
-WAVE_FG = "#2a78d6"
-WAVE_XFADE = "#fbe1d6"
-WAVE_MIDLINE = "#d6d5d0"
-PLAYHEAD = "#d03b3b"
-PEAK_LIMITED_FG = "#b4580f"  # dark orange text for outputs that missed the LUFS target
-
-PLAYHEAD_REFRESH_MS = 30
-LOOP_POINT_PREROLL_S = 2.0  # "Play loop point" starts this long before the wrap
+VALIDATE_DELAY_MS = 150  # debounce: re-validate shortly after the last keystroke
+SETTINGS_ERROR_FG = STATUS_COLOURS[batch.ERROR]
 
 
 class LoopMakerApp:
-    """Main window: file list, settings, Process button, test playback and log."""
+    """Main window: file table, global settings, batch run, playback and log."""
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.files: list[Path] = []
-        self.results: list[pipeline.ProcessResult] = []  # rows of the output list
         self.log_queue: queue.Queue[tuple] = queue.Queue()
         self.worker: threading.Thread | None = None
-
-        self.player = preview.LoopPlayer()
-        self.preview_data = None          # float32 (frames, channels) of the selected output
-        self.preview_result: pipeline.ProcessResult | None = None
+        self.validations: list[batch.Validation] = []
+        self.last_report: batch.BatchReport | None = None
+        self._validate_job: str | None = None
+        self._syncing = False
 
         root.title(APP_NAME)
-        root.minsize(720, 760)
+        root.minsize(960, 820)
 
-        # Tk variables bound to the settings widgets.
-        self.crossfade_var = tk.StringVar(value=str(pipeline.DEFAULT_CROSSFADE_S))
-        self.curve_var = tk.StringVar(value=core.DEFAULT_CURVE)
-        self.safety_var = tk.StringVar(value=f"{core.DEFAULT_SAFETY_FADE_S * 1000:g}")
-        self.out_var = tk.StringVar(value=str(pipeline.DEFAULT_OUT_DIR.resolve()))
-        self.normalize_var = tk.BooleanVar(value=False)
-        self.target_lufs_var = tk.StringVar(value=f"{loudness.DEFAULT_TARGET_LUFS:g}")
-        self.ceiling_var = tk.StringVar(value=f"{loudness.DEFAULT_PEAK_CEILING_DBTP:g}")
-        self.status_var = tk.StringVar(value="Process some files, then pick an output to audition it.")
-
-        # Output presets (user-editable JSON with built-in fallback) and naming.
-        self.presets, self.preset_warnings = presets.load_presets()
-        self.preset_var = tk.StringVar(value=presets.CUSTOM)
-        self.rate_var = tk.StringVar(value=presets.SOURCE)
-        self.depth_var = tk.StringVar(value=presets.SOURCE)
-        self.format_var = tk.StringVar(value="WAV")
-        self.template_var = tk.StringVar(value=naming.DEFAULT_TEMPLATE)
-        self.category_var = tk.StringVar(value=naming.DEFAULT_CATEGORY)
-        self.suffix_var = tk.StringVar(value=naming.DEFAULT_SUFFIX)
-        self.name_preview_var = tk.StringVar()
-        self.variations_var = tk.StringVar(value="Off")
-        self.spacing_var = tk.StringVar(value=f"{variations.DEFAULT_MIN_SPACING * 100:g}")
-        self.short_warn_var = tk.StringVar(value=f"{variations.DEFAULT_SHORT_WARNING_S:g}")
-
+        self.presets, preset_warnings = presets.load_presets()
+        self._create_variables()
         self._build_layout()
         self._enable_drag_and_drop()
-        self._bind_shortcuts()
-        for warning in self.preset_warnings:
-            self._log(f"WARNING {warning}")
+        self.root.bind_all("<space>", self._on_space)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.root.after(100, self._drain_log_queue)
-        self.root.after(PLAYHEAD_REFRESH_MS, self._update_playhead)
+        for warning in preset_warnings:
+            self._log(f"WARNING {warning}")
+        self._on_settings_changed()
+        self.root.after(100, self._drain_queue)
 
-    # ------------------------------------------------------------------ layout
+    # --------------------------------------------------------------- state
+
+    def _create_variables(self) -> None:
+        """Tk variables bound to the global settings widgets."""
+        sv = tk.StringVar
+        self.crossfade_var = sv(value=str(pipeline.DEFAULT_CROSSFADE_S))
+        self.curve_var = sv(value=core.DEFAULT_CURVE)
+        self.safety_var = sv(value=f"{core.DEFAULT_SAFETY_FADE_S * 1000:g}")
+        self.variations_var = sv(value="Off")
+        self.spacing_var = sv(value=f"{variations.DEFAULT_MIN_SPACING * 100:g}")
+        self.short_warn_var = sv(value=f"{variations.DEFAULT_SHORT_WARNING_S:g}")
+        self.policy_var = sv(value=batch.POLICY_LABELS[batch.DEFAULT_POLICY])
+        self.preset_var = sv(value=presets.CUSTOM)
+        self.rate_var = sv(value=presets.SOURCE)
+        self.depth_var = sv(value=presets.SOURCE)
+        self.format_var = sv(value="WAV")
+        self.normalize_var = tk.BooleanVar(value=False)
+        self.target_lufs_var = sv(value=f"{loudness.DEFAULT_TARGET_LUFS:g}")
+        self.ceiling_var = sv(value=f"{loudness.DEFAULT_PEAK_CEILING_DBTP:g}")
+        self.template_var = sv(value=naming.DEFAULT_TEMPLATE)
+        self.category_var = sv(value=naming.DEFAULT_CATEGORY)
+        self.suffix_var = sv(value=naming.DEFAULT_SUFFIX)
+        self.out_var = sv(value=str(pipeline.DEFAULT_OUT_DIR.resolve()))
+        self.max_xfade_var = sv()
+        self.template_hint_var = sv()
+        self.summary_var = sv()
+
+        for var in (self.crossfade_var, self.curve_var, self.safety_var, self.variations_var, self.spacing_var,
+                    self.short_warn_var, self.policy_var, self.preset_var, self.rate_var, self.depth_var,
+                    self.format_var, self.normalize_var, self.target_lufs_var, self.ceiling_var,
+                    self.template_var, self.category_var, self.suffix_var, self.out_var):
+            var.trace_add("write", lambda *_: self._on_settings_changed())
+
+    # -------------------------------------------------------------- layout
 
     def _build_layout(self) -> None:
         pad = {"padx": 8, "pady": 4}
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)  # file list
-        self.root.rowconfigure(3, weight=2)  # test playback (waveform)
+        self.root.rowconfigure(0, weight=2)  # file table
+        self.root.rowconfigure(3, weight=2)  # test playback
         self.root.rowconfigure(4, weight=1)  # log
 
-        self._build_file_list(row=0, pad=pad)
+        self._build_files(row=0, pad=pad)
         self._build_settings(row=1, pad=pad)
-
-        self.process_button = ttk.Button(self.root, text="Process", command=self._start_processing)
-        self.process_button.grid(row=2, column=0, sticky="ew", **pad)
-
-        self._build_test_area(row=3, pad=pad)
+        self._build_run_bar(row=2, pad=pad)
+        self.playback = PlaybackPanel(self.root, lambda: Path(self.out_var.get()))
+        self.playback.grid(row=3, column=0, sticky="nsew", **pad)
         self._build_log(row=4, pad=pad)
 
-    def _build_file_list(self, row: int, pad: dict) -> None:
-        frame = ttk.LabelFrame(self.root, text="Input files")
+    def _build_files(self, row: int, pad: dict) -> None:
+        frame = ttk.LabelFrame(self.root, text="Files  (hover a status for details; leave Crossfade/Var. empty to use the global setting)")
         frame.grid(row=row, column=0, sticky="nsew", **pad)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
 
-        self.file_list = tk.Listbox(frame, selectmode=tk.EXTENDED, height=5, exportselection=False)
-        self.file_list.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
-        scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.file_list.yview)
-        scroll.grid(row=0, column=1, sticky="ns", pady=6)
-        self.file_list.configure(yscrollcommand=scroll.set)
+        self.table = FileTable(frame, on_change=self._schedule_validate)
+        self.table.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=0, column=2, sticky="n", padx=6, pady=6)
+        buttons.grid(row=0, column=1, sticky="n", padx=6, pady=6)
         for text, command in [
             ("Add files...", self._add_files_dialog),
             ("Add folder...", self._add_folder_dialog),
@@ -140,161 +139,129 @@ class LoopMakerApp:
         ]:
             ttk.Button(buttons, text=text, command=command).pack(fill=tk.X, pady=2)
 
-        self.drop_hint = ttk.Label(frame, foreground="gray")
-        self.drop_hint.grid(row=1, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
-
     def _build_settings(self, row: int, pad: dict) -> None:
-        frame = ttk.LabelFrame(self.root, text="Settings")
+        frame = ttk.LabelFrame(self.root, text="Global settings")
         frame.grid(row=row, column=0, sticky="ew", **pad)
-        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(0, weight=1)
 
-        ttk.Label(frame, text="Crossfade (s)").grid(row=0, column=0, sticky="w", **pad)
-        ttk.Entry(frame, textvariable=self.crossfade_var, width=10).grid(row=0, column=1, sticky="w", **pad)
+        def line(r: int) -> ttk.Frame:
+            f = ttk.Frame(frame)
+            f.grid(row=r, column=0, sticky="ew")
+            return f
 
-        ttk.Label(frame, text="Curve").grid(row=1, column=0, sticky="w", **pad)
-        ttk.Combobox(
-            frame, textvariable=self.curve_var, values=core.CURVES, state="readonly", width=14
-        ).grid(row=1, column=1, sticky="w", **pad)
+        def label(parent, text):
+            ttk.Label(parent, text=text).pack(side=tk.LEFT, **pad)
 
-        ttk.Label(frame, text="Safety fade (ms)").grid(row=2, column=0, sticky="w", **pad)
-        ttk.Entry(frame, textvariable=self.safety_var, width=10).grid(row=2, column=1, sticky="w", **pad)
+        def entry(parent, var, width):
+            ttk.Entry(parent, textvariable=var, width=width).pack(side=tk.LEFT)
 
-        # Loudness normalisation: checkbox + target + true-peak ceiling on one row.
-        norm_row = ttk.Frame(frame)
-        norm_row.grid(row=3, column=0, columnspan=3, sticky="w")
-        ttk.Checkbutton(norm_row, text="Normalize loudness to", variable=self.normalize_var).pack(side=tk.LEFT, **pad)
-        ttk.Entry(norm_row, textvariable=self.target_lufs_var, width=7).pack(side=tk.LEFT)
-        ttk.Label(norm_row, text="LUFS     true-peak ceiling").pack(side=tk.LEFT, **pad)
-        ttk.Entry(norm_row, textvariable=self.ceiling_var, width=7).pack(side=tk.LEFT)
-        ttk.Label(norm_row, text="dBTP").pack(side=tk.LEFT, **pad)
+        def combo(parent, var, values, width):
+            box = ttk.Combobox(parent, textvariable=var, values=values, state="readonly", width=width)
+            box.pack(side=tk.LEFT)
+            return box
 
-        # Output preset + Custom fields (editable only when the preset is Custom).
-        preset_row = ttk.Frame(frame)
-        preset_row.grid(row=4, column=0, columnspan=3, sticky="w")
-        ttk.Label(preset_row, text="Preset").pack(side=tk.LEFT, **pad)
-        ttk.Combobox(
-            preset_row, textvariable=self.preset_var, values=[presets.CUSTOM, *self.presets],
-            state="readonly", width=10,
-        ).pack(side=tk.LEFT)
+        r0 = line(0)
+        label(r0, "Crossfade (s)")
+        entry(r0, self.crossfade_var, 7)
+        ttk.Label(r0, textvariable=self.max_xfade_var, foreground="gray").pack(side=tk.LEFT, **pad)
+        label(r0, "   Curve")
+        combo(r0, self.curve_var, core.CURVES, 11)
+        label(r0, "   Safety fade (ms)")
+        entry(r0, self.safety_var, 5)
+
+        r1 = line(1)
+        label(r1, "Variations")
+        combo(r1, self.variations_var, ["Off", *map(str, variations.VARIATION_COUNTS)], 5)
+        label(r1, "min spacing (% of file)")
+        entry(r1, self.spacing_var, 5)
+        label(r1, "warn below (s)")
+        entry(r1, self.short_warn_var, 5)
+        label(r1, "   On problem")
+        combo(r1, self.policy_var, list(batch.POLICY_LABELS.values()), 14)
+
+        r2 = line(2)
+        label(r2, "Preset")
+        combo(r2, self.preset_var, [presets.CUSTOM, *self.presets], 10)
         self.custom_widgets = []
-        for label, var, values in [
+        for text, var, values in [
             ("Sample rate", self.rate_var, [presets.SOURCE, *map(str, presets.SAMPLE_RATES)]),
             ("Bit depth", self.depth_var, [presets.SOURCE, *presets.BIT_DEPTHS]),
             ("Format", self.format_var, list(presets.available_formats())),
         ]:
-            ttk.Label(preset_row, text=label).pack(side=tk.LEFT, **pad)
-            box = ttk.Combobox(preset_row, textvariable=var, values=values, state="readonly", width=8)
-            box.pack(side=tk.LEFT)
-            self.custom_widgets.append(box)
+            label(r2, text)
+            self.custom_widgets.append(combo(r2, var, values, 8))
+        label(r2, "   ")
+        ttk.Checkbutton(r2, text="Normalize loudness to", variable=self.normalize_var).pack(side=tk.LEFT)
+        entry(r2, self.target_lufs_var, 6)
+        label(r2, "LUFS, true-peak ceiling")
+        entry(r2, self.ceiling_var, 5)
+        label(r2, "dBTP")
 
-        # Loop variations.
-        var_row = ttk.Frame(frame)
-        var_row.grid(row=8, column=0, columnspan=3, sticky="w")
-        ttk.Label(var_row, text="Variations").pack(side=tk.LEFT, **pad)
-        ttk.Combobox(var_row, textvariable=self.variations_var, values=["Off", *map(str, variations.VARIATION_COUNTS)],
-                     state="readonly", width=5).pack(side=tk.LEFT)
-        ttk.Label(var_row, text="min spacing").pack(side=tk.LEFT, **pad)
-        ttk.Entry(var_row, textvariable=self.spacing_var, width=5).pack(side=tk.LEFT)
-        ttk.Label(var_row, text="% of file     warn below").pack(side=tk.LEFT, **pad)
-        ttk.Entry(var_row, textvariable=self.short_warn_var, width=5).pack(side=tk.LEFT)
-        ttk.Label(var_row, text="s").pack(side=tk.LEFT, **pad)
-        self.variations_var.trace_add("write", lambda *_: self._refresh_name_preview())
+        r3 = line(3)
+        label(r3, "Name template")
+        entry(r3, self.template_var, 30)
+        label(r3, "{category}")
+        entry(r3, self.category_var, 8)
+        label(r3, "{suffix}")
+        entry(r3, self.suffix_var, 8)
+        self.template_hint = ttk.Label(r3, textvariable=self.template_hint_var, foreground="gray")
+        self.template_hint.pack(side=tk.LEFT, **pad)
 
-        # Naming template + live preview of the resulting file names.
-        naming_row = ttk.Frame(frame)
-        naming_row.grid(row=5, column=0, columnspan=3, sticky="ew")
-        ttk.Label(naming_row, text="Name template").pack(side=tk.LEFT, **pad)
-        ttk.Entry(naming_row, textvariable=self.template_var, width=28).pack(side=tk.LEFT)
-        ttk.Label(naming_row, text="{category}").pack(side=tk.LEFT, **pad)
-        ttk.Entry(naming_row, textvariable=self.category_var, width=8).pack(side=tk.LEFT)
-        ttk.Label(naming_row, text="{suffix}").pack(side=tk.LEFT, **pad)
-        ttk.Entry(naming_row, textvariable=self.suffix_var, width=8).pack(side=tk.LEFT)
-        self.name_preview = ttk.Label(frame, textvariable=self.name_preview_var, foreground="gray")
-        self.name_preview.grid(row=6, column=0, columnspan=3, sticky="w", padx=8)
+        r4 = line(4)
+        label(r4, "Output folder")
+        ttk.Entry(r4, textvariable=self.out_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(r4, text="Browse...", command=self._choose_output).pack(side=tk.LEFT, **pad)
 
-        ttk.Label(frame, text="Output folder").grid(row=7, column=0, sticky="w", **pad)
-        ttk.Entry(frame, textvariable=self.out_var).grid(row=7, column=1, sticky="ew", **pad)
-        ttk.Button(frame, text="Browse...", command=self._choose_output).grid(row=7, column=2, **pad)
-
-        for var in (self.preset_var, self.template_var, self.category_var, self.suffix_var,
-                    self.rate_var, self.depth_var, self.format_var):
-            var.trace_add("write", lambda *_: self._on_output_settings_changed())
-        self._on_output_settings_changed()
-
-    def _build_test_area(self, row: int, pad: dict) -> None:
-        frame = ttk.LabelFrame(self.root, text="Test playback")
-        frame.grid(row=row, column=0, sticky="nsew", **pad)
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(1, weight=1)
-
-        # Output list + transport buttons.
-        self.output_list = tk.Listbox(frame, height=4, exportselection=False, activestyle="none")
-        self.output_list.grid(row=0, column=0, sticky="ew", padx=(6, 0), pady=6)
-        self.output_list.bind("<<ListboxSelect>>", self._on_output_selected)
-
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=0, column=1, sticky="n", padx=6, pady=6)
-        self.play_button = ttk.Button(buttons, text="Play  (Space)", command=self._toggle_playback)
-        self.play_button.pack(fill=tk.X, pady=2)
-        ttk.Button(buttons, text="Play loop point", command=self._play_loop_point).pack(fill=tk.X, pady=2)
-        ttk.Button(buttons, text="Open output folder", command=self._open_output_folder).pack(fill=tk.X, pady=2)
-
-        # Waveform: click to play from that point.
-        self.wave = tk.Canvas(frame, height=130, background=WAVE_BG, highlightthickness=1,
-                              highlightbackground=WAVE_MIDLINE, cursor="hand2")
-        self.wave.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=6)
-        self.wave.bind("<Configure>", lambda _e: self._draw_waveform())
-        self.wave.bind("<Button-1>", self._on_wave_click)
-
-        ttk.Label(frame, textvariable=self.status_var, foreground="gray").grid(
-            row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 6)
-        )
+    def _build_run_bar(self, row: int, pad: dict) -> None:
+        bar = ttk.Frame(self.root)
+        bar.grid(row=row, column=0, sticky="ew", **pad)
+        bar.columnconfigure(0, weight=1)
+        self.summary_label = ttk.Label(bar, textvariable=self.summary_var, font=("Segoe UI", 10, "bold"))
+        self.summary_label.grid(row=0, column=0, sticky="w")
+        self.process_button = ttk.Button(bar, text="Process", command=self._start_processing, width=16)
+        self.process_button.grid(row=0, column=1, padx=4)
+        self.export_button = ttk.Button(bar, text="Export report...", command=self._export_report, state=tk.DISABLED)
+        self.export_button.grid(row=0, column=2)
 
     def _build_log(self, row: int, pad: dict) -> None:
-        frame = ttk.LabelFrame(self.root, text="Log / loop quality report")
+        frame = ttk.LabelFrame(self.root, text="Log / batch report")
         frame.grid(row=row, column=0, sticky="nsew", **pad)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        self.log = ScrolledText(frame, height=7, font=("Consolas", 9), state=tk.DISABLED, wrap=tk.NONE)
+        self.log = ScrolledText(frame, height=6, font=("Consolas", 9), state=tk.DISABLED, wrap=tk.NONE)
         self.log.grid(row=0, column=0, sticky="nsew", padx=6, pady=(6, 0))
-        log_xscroll = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=self.log.xview)
-        log_xscroll.grid(row=1, column=0, sticky="ew", padx=6, pady=(0, 6))
-        self.log.configure(xscrollcommand=log_xscroll.set)
+        xscroll = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=self.log.xview)
+        xscroll.grid(row=1, column=0, sticky="ew", padx=6, pady=(0, 6))
+        self.log.configure(xscrollcommand=xscroll.set)
 
     def _enable_drag_and_drop(self) -> None:
         if TkinterDnD is None or not hasattr(self.root, "drop_target_register"):
-            self.drop_hint.configure(text="Tip: install tkinterdnd2 to drag and drop files here.")
+            self.table.empty_hint.configure(text="Use Add files... (install tkinterdnd2 for drag and drop)")
             return
-        self.file_list.drop_target_register(DND_FILES)
-        self.file_list.dnd_bind("<<Drop>>", self._on_drop)
-        self.drop_hint.configure(text="Drag and drop audio files or folders onto the list.")
-
-    def _bind_shortcuts(self) -> None:
-        # bind_all so Space works wherever the focus is ...
-        self.root.bind_all("<space>", self._on_space)
+        for widget in (self.table.canvas, self.table.inner, self.table.empty_hint):
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<Drop>>", self._on_drop)
 
     def _on_space(self, event) -> str | None:
-        # ... except where Space already means something: typing in a text
-        # field (Entry/Combobox) or pressing a focused button.
-        if isinstance(event.widget, (tk.Entry, ttk.Button, tk.Button, tk.Text)):
+        # Space toggles playback, except where it already means something:
+        # typing in a text field, pressing a focused button or checkbox.
+        if isinstance(event.widget, (tk.Entry, ttk.Button, tk.Button, tk.Text, tk.Checkbutton, ttk.Checkbutton)):
             return None
-        self._toggle_playback()
+        self.playback.toggle()
         return "break"
 
-    # ------------------------------------------------------------- file list
+    # ----------------------------------------------------------- file table
 
     def _add_paths(self, paths: list[str]) -> None:
         """Add files/folders (folders are expanded) and report anything skipped."""
         found, problems = audio_io.collect_inputs(paths)
-        known = {p.resolve() for p in self.files}
+        known = {p.resolve() for p in self.table.paths()}
         for path in found:
             if path.resolve() not in known:
-                self.files.append(path)
-                # File name first so it stays visible even with long folder paths.
-                self.file_list.insert(tk.END, f"{path.name}    ({path.parent})")
+                self.table.add(path)
         for problem in problems:
             self._log(f"SKIPPED {problem}")
-        self._refresh_name_preview()
+        self._schedule_validate()
 
     def _on_drop(self, event) -> None:
         # tkinterdnd2 delivers a Tcl list; splitlist handles paths with spaces/braces.
@@ -309,58 +276,22 @@ class LoopMakerApp:
             self._add_paths([folder])
 
     def _remove_selected(self) -> None:
-        for index in reversed(self.file_list.curselection()):
-            self.file_list.delete(index)
-            del self.files[index]
-        self._refresh_name_preview()
+        if not self.table.remove_selected():
+            messagebox.showinfo(APP_NAME, "Tick the checkbox of the rows you want to remove.")
 
     def _clear_files(self) -> None:
-        self.file_list.delete(0, tk.END)
-        self.files.clear()
-        self._refresh_name_preview()
+        self.table.clear()
 
     def _choose_output(self) -> None:
         folder = filedialog.askdirectory(title="Choose output folder", initialdir=self.out_var.get())
         if folder:
             self.out_var.set(folder)
 
-    # ------------------------------------------------------------ processing
+    # ------------------------------------------------------------ settings
 
-    def _read_settings(self) -> pipeline.LoopSettings | None:
-        """Parse the form; show an error dialog and return None if invalid."""
-        try:
-            crossfade = float(self.crossfade_var.get())
-            safety = float(self.safety_var.get())
-            target = float(self.target_lufs_var.get())
-            ceiling = float(self.ceiling_var.get())
-            spacing = float(self.spacing_var.get()) / 100.0
-            short_warning = float(self.short_warn_var.get())
-        except ValueError:
-            messagebox.showerror(APP_NAME, "Crossfade, safety fade, LUFS, dBTP and variation fields must be numbers.")
-            return None
-        if crossfade <= 0 or safety < 0:
-            messagebox.showerror(APP_NAME, "Crossfade must be > 0 and safety fade must be >= 0.")
-            return None
-        settings = pipeline.LoopSettings(
-            crossfade_s=crossfade,
-            curve=self.curve_var.get(),
-            safety_fade_ms=safety,
-            out_dir=Path(self.out_var.get()),
-            normalize_lufs=target if self.normalize_var.get() else None,
-            peak_ceiling_dbtp=ceiling,
-            output=self._current_output_spec(),
-            naming=self._current_naming(),
-            variations=self._current_variations(),
-            min_spacing=spacing,
-            short_warning_s=short_warning,
-        )
-        problems = settings.errors()
-        if problems:
-            messagebox.showerror(APP_NAME, "Please fix the settings first:\n\n" + "\n".join(problems))
-            return None
-        return settings
-
-    # ------------------------------------------------- output preset / naming
+    def _policy(self) -> str:
+        label = self.policy_var.get()
+        return next((k for k, v in batch.POLICY_LABELS.items() if v == label), batch.DEFAULT_POLICY)
 
     def _current_output_spec(self) -> presets.OutputSpec:
         name = self.preset_var.get()
@@ -373,22 +304,51 @@ class LoopMakerApp:
             file_format=self.format_var.get(),
         )
 
-    def _current_variations(self) -> int:
-        value = self.variations_var.get()
-        return 0 if value == "Off" else int(value)
+    def _collect_settings(self) -> tuple[pipeline.LoopSettings | None, list[str]]:
+        """Build LoopSettings from the form. Returns (settings, problems); no dialogs."""
+        numbers = {}
+        problems = []
+        for key, var, label in [
+            ("crossfade", self.crossfade_var, "crossfade"), ("safety", self.safety_var, "safety fade"),
+            ("spacing", self.spacing_var, "min spacing"), ("warn", self.short_warn_var, "warn-below"),
+            ("target", self.target_lufs_var, "LUFS target"), ("ceiling", self.ceiling_var, "true-peak ceiling"),
+        ]:
+            try:
+                numbers[key] = float(var.get())
+            except ValueError:
+                problems.append(f"{label} must be a number")
+        if problems:
+            return None, problems
+        if numbers["crossfade"] <= 0:
+            problems.append("crossfade must be greater than 0")
+        if numbers["safety"] < 0:
+            problems.append("safety fade cannot be negative")
+        count = self.variations_var.get()
+        settings = pipeline.LoopSettings(
+            crossfade_s=numbers["crossfade"],
+            curve=self.curve_var.get(),
+            safety_fade_ms=numbers["safety"],
+            out_dir=Path(self.out_var.get()),
+            normalize_lufs=numbers["target"] if self.normalize_var.get() else None,
+            peak_ceiling_dbtp=numbers["ceiling"],
+            output=self._current_output_spec(),
+            naming=naming.Naming(self.template_var.get(), self.category_var.get(), self.suffix_var.get()),
+            variations=0 if count == "Off" else int(count),
+            min_spacing=numbers["spacing"] / 100.0,
+            short_warning_s=numbers["warn"],
+        )
+        problems += settings.errors()
+        return (None if problems else settings), problems
 
-    def _current_naming(self) -> naming.Naming:
-        return naming.Naming(self.template_var.get(), self.category_var.get(), self.suffix_var.get())
-
-    def _on_output_settings_changed(self) -> None:
-        """Sync the Custom fields with the preset and refresh the name preview."""
-        if getattr(self, "_syncing", False):
+    def _on_settings_changed(self) -> None:
+        """Keep the Custom fields in sync with the preset, then re-validate."""
+        if self._syncing:
             return  # writing the fields below re-triggers this callback
         self._syncing = True
         try:
             name = self.preset_var.get()
             is_custom = name == presets.CUSTOM or name not in self.presets
-            for box in self.custom_widgets:
+            for box in getattr(self, "custom_widgets", []):
                 box.configure(state="readonly" if is_custom else tk.DISABLED)
             if not is_custom:  # show what the preset will do
                 spec = self.presets[name].spec
@@ -397,84 +357,156 @@ class LoopMakerApp:
                 self.format_var.set(spec.file_format)
         finally:
             self._syncing = False
-        self._refresh_name_preview()
+        self._schedule_validate()
 
-    def _refresh_name_preview(self) -> None:
-        """Show the output names the current template gives (or why it is invalid)."""
-        if not hasattr(self, "name_preview"):
+    # ---------------------------------------------------------- validation
+
+    def _schedule_validate(self) -> None:
+        """Debounced live validation (every settings change or table edit)."""
+        if self._validate_job is not None:
+            self.root.after_cancel(self._validate_job)
+        self._validate_job = self.root.after(VALIDATE_DELAY_MS, self._validate_now)
+
+    def _validate_now(self) -> None:
+        self._validate_job = None
+        settings, problems = self._collect_settings()
+        rows = self.table.rows
+
+        if settings is None:
+            self.validations = []
+            for row in rows:
+                self.table.show_validation(row, None)
+            self.template_hint.configure(foreground=SETTINGS_ERROR_FG)
+            self.template_hint_var.set("")
+            self.summary_label.configure(foreground=SETTINGS_ERROR_FG)
+            self.summary_var.set("Settings problem: " + "; ".join(problems))
+            self.max_xfade_var.set("")
+            self._update_process_button()
             return
-        spec, names = self._current_output_spec(), self._current_naming()
-        problems = spec.errors() + names.errors()
-        if problems:
-            self.name_preview.configure(foreground="#d03b3b")
-            self.name_preview_var.set("Cannot process: " + "; ".join(problems))
+
+        warnings = settings.naming.warnings()
+        self.template_hint.configure(foreground=STATUS_COLOURS[batch.WARNING] if warnings else "gray")
+        self.template_hint_var.set(warnings[0] if warnings else
+                                   "e.g. " + settings.naming.render("Example Recording", 1) +
+                                   audio_io.EXTENSIONS[settings.output.file_format])
+
+        for row in rows:
+            row.parse_overrides()
+        self.validations = batch.validate_batch([row.job for row in rows], settings, self._policy())
+        for row, validation in zip(rows, self.validations):
+            if row.override_errors:  # unparsable override cells make the row an error
+                validation.errors = row.override_errors + validation.errors
+                validation.status = batch.ERROR
+                validation.output_paths = []
+            self.table.show_validation(row, validation)
+
+        self.summary_label.configure(foreground="")
+        self.summary_var.set(batch.summary_line(self.validations) if rows else "Add files to begin.")
+        self._update_max_crossfade()
+        self._update_process_button()
+
+    def _update_max_crossfade(self) -> None:
+        selected = [row.validation for row in self.table.selected_rows() if row.validation]
+        pool = selected or self.validations
+        value = batch.batch_max_crossfade(pool)
+        if value is None:
+            self.max_xfade_var.set("")
             return
-        settings = pipeline.LoopSettings(output=spec, naming=names, out_dir=Path(self.out_var.get()),
-                                         variations=self._current_variations())
-        inputs = self.files[:3] or [Path("Example Recording.wav")]
-        taken: set[Path] = set()
-        try:
-            shown = [
-                pipeline.output_paths_for(p, settings, i, max(len(self.files), 1), taken)[0].name
-                for i, p in enumerate(inputs, start=1)
-            ]
-        except ValueError as exc:
-            self.name_preview.configure(foreground="#d03b3b")
-            self.name_preview_var.set(f"Cannot process: {exc}")
-            return
-        more = f"  (+{len(self.files) - 3} more)" if len(self.files) > 3 else ""
-        warnings = names.warnings()
-        self.name_preview.configure(foreground="#b4580f" if warnings else "gray")
-        self.name_preview_var.set(
-            "Output names: " + ", ".join(shown) + more + (f"   WARNING: {warnings[0]}" if warnings else "")
-        )
+        scope = f"{len(selected)} selected" if selected else f"all {len(pool)} file{'s' if len(pool) != 1 else ''}"
+        self.max_xfade_var.set(f"max {value:.2f} s for {scope}")
+
+    def _update_process_button(self) -> None:
+        running = self.worker is not None and self.worker.is_alive()
+        ready = any(v.processable for v in self.validations)
+        self.process_button.configure(state=tk.NORMAL if ready and not running else tk.DISABLED)
+
+    # ---------------------------------------------------------- processing
 
     def _start_processing(self) -> None:
         if self.worker and self.worker.is_alive():
             return
-        if not self.files:
-            messagebox.showinfo(APP_NAME, "Add some audio files first.")
-            return
-        settings = self._read_settings()
+        self._validate_now()  # make sure we run exactly what is shown
+        settings, problems = self._collect_settings()
         if settings is None:
+            messagebox.showerror(APP_NAME, "Please fix the settings first:\n\n" + "\n".join(problems))
+            return
+        validations, policy = list(self.validations), self._policy()
+        if not any(v.processable for v in validations):
             return
 
-        # Outputs may be overwritten, so release the current preview first.
-        self._clear_outputs()
+        self.playback.clear()  # outputs may be overwritten: release the preview first
+        for i, v in enumerate(validations):
+            self.table.show_progress(i, "queued" if v.processable else "-")
+        self._log(f"Starting batch. {batch.summary_line(validations)}. On problem: {batch.POLICY_LABELS[policy]}.")
+        for v in validations:
+            for change in v.changes:
+                self._log(f"AUTO-CLAMP {change}")
         self.process_button.configure(state=tk.DISABLED, text="Processing...")
-        files = list(self.files)  # snapshot: the worker must not see later list edits
-        self.worker = threading.Thread(target=self._process_worker, args=(files, settings), daemon=True)
+        self.export_button.configure(state=tk.DISABLED)
+        self.worker = threading.Thread(target=self._worker, args=(validations, settings, policy), daemon=True)
         self.worker.start()
 
-    def _process_worker(self, files: list[Path], settings: pipeline.LoopSettings) -> None:
+    def _worker(self, validations, settings, policy) -> None:
         """Runs off the UI thread. Communicates only through ``log_queue``."""
-        failures = 0
-        for path, result in pipeline.process_batch(files, settings):
-            if isinstance(result, Exception):
-                failures += 1
-                self.log_queue.put(("log", f"FAILED  {path.name}: {result}\n"))
-            else:
-                for output in result.outputs:  # one input can produce several files
-                    self.log_queue.put(("result", output))
-                self.log_queue.put(("log", result.format() + "\n"))
-        self.log_queue.put(("log", f"Done: {len(files) - failures} written, {failures} failed.\n"))
-        self.log_queue.put(("done",))
+        def on_event(kind: str, index: int, payload) -> None:
+            self.log_queue.put((kind, index, payload))
 
-    def _drain_log_queue(self) -> None:
+        try:
+            report = batch.run_batch(validations, settings, policy, on_event)
+        except Exception as exc:  # noqa: BLE001 - never leave the UI stuck in "Processing..."
+            self.log_queue.put(("crash", -1, exc))
+        else:
+            self.log_queue.put(("report", -1, report))
+
+    def _drain_queue(self) -> None:
         try:
             while True:
-                kind, *payload = self.log_queue.get_nowait()
-                if kind == "log":
-                    self._log(payload[0])
-                elif kind == "result":
-                    self._add_output(payload[0])
+                kind, index, payload = self.log_queue.get_nowait()
+                if kind == "start":
+                    self.table.show_progress(index, "processing...")
                 elif kind == "done":
-                    self.process_button.configure(state=tk.NORMAL, text="Process")
-                    if self.results and not self.output_list.curselection():
-                        self._select_output(0)
+                    self._show_file_done(index, payload)
+                elif kind == "report":
+                    self._finish_batch(payload)
+                elif kind == "crash":
+                    self._log(f"ERROR batch crashed: {payload}")
+                    self._finish_batch(None)
         except queue.Empty:
             pass
-        self.root.after(100, self._drain_log_queue)
+        self.root.after(100, self._drain_queue)
+
+    def _show_file_done(self, index: int, report: batch.FileReport) -> None:
+        if report.status == batch.WRITTEN:
+            n = len(report.outputs)
+            self.table.show_progress(index, f"done ({n} file{'s' if n != 1 else ''})", report.format())
+            for output in report.outputs:
+                self.playback.add_output(output)
+                self._log(output.format() + "\n")
+        else:
+            self.table.show_progress(index, report.status, report.reason)
+            self._log(f"{report.status.upper()} {report.input_path.name}: {report.reason}\n")
+
+    def _finish_batch(self, report: batch.BatchReport | None) -> None:
+        self.process_button.configure(text="Process")
+        self._update_process_button()
+        if report is not None:
+            self.last_report = report
+            self.export_button.configure(state=tk.NORMAL)
+            self._log("=" * 72 + "\n" + report.format())
+        if self.playback.results and not self.playback.has_selection():
+            self.playback.select(0)
+
+    def _export_report(self) -> None:
+        if self.last_report is None:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export batch report", defaultextension=".txt", initialdir=self.out_var.get(),
+            initialfile=f"loop_maker_report_{self.last_report.created:%Y%m%d_%H%M%S}.txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+        )
+        if path:
+            self.last_report.export(Path(path))
+            self._log(f"Report exported to {path}")
 
     def _log(self, text: str) -> None:
         self.log.configure(state=tk.NORMAL)
@@ -482,155 +514,8 @@ class LoopMakerApp:
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
 
-    # -------------------------------------------------------- test playback
-
-    def _add_output(self, result: pipeline.ProcessResult) -> None:
-        self.results.append(result)
-        verdict = "SMOOTH" if result.quality.after.is_smooth else "CHECK BY EAR"
-        parts = [result.output_path.name, f"{result.output_seconds:.2f} s", verdict, result.curve]
-        norm = result.normalization
-        if norm is not None:
-            parts.append(f"{norm.final_lufs:.1f} LUFS")
-            if norm.limited_by_peak:
-                # Make it obvious without digging through the log.
-                parts.append(f"PEAK-LIMITED ({norm.shortfall_db:.1f} dB short of {norm.target_lufs:g})")
-        self.output_list.insert(tk.END, "    ".join(parts))
-        if norm is not None and norm.limited_by_peak:
-            self.output_list.itemconfigure(tk.END, foreground=PEAK_LIMITED_FG)
-
-    def _clear_outputs(self) -> None:
-        self.player.close()
-        self.results.clear()
-        self.output_list.delete(0, tk.END)
-        self.preview_data = None
-        self.preview_result = None
-        self._draw_waveform()
-        self._refresh_play_button()
-
-    def _select_output(self, index: int) -> None:
-        self.output_list.selection_clear(0, tk.END)
-        self.output_list.selection_set(index)
-        self.output_list.activate(index)
-        self._on_output_selected()
-
-    def _on_output_selected(self, _event=None) -> None:
-        selection = self.output_list.curselection()
-        if not selection:
-            return
-        result = self.results[selection[0]]
-        if result is self.preview_result:
-            return  # already loaded (e.g. Space re-selected the same row)
-
-        self.player.stop()
-        try:
-            self.preview_data, sample_rate = preview.load_for_preview(result.output_path)
-        except Exception as exc:  # noqa: BLE001 - shown to the user
-            messagebox.showerror(APP_NAME, f"Could not open {result.output_path.name}:\n{exc}")
-            return
-        self.preview_result = result
-        try:
-            self.player.load(self.preview_data, sample_rate)
-        except preview.PlaybackUnavailable as exc:
-            self.status_var.set(f"Waveform only: {exc}")
-        self._draw_waveform()
-        self._refresh_play_button()
-
-    def _toggle_playback(self) -> None:
-        if not self.player.is_loaded:
-            return
-        if self.player.is_playing:
-            self.player.stop()
-        else:
-            self._safe_play()
-        self._refresh_play_button()
-
-    def _play_loop_point(self) -> None:
-        """Start shortly before the end so you hear the wrap (end -> start) right away."""
-        if self.player.is_loaded:
-            self._safe_play(max(0.0, self.player.duration_s - LOOP_POINT_PREROLL_S))
-            self._refresh_play_button()
-
-    def _on_wave_click(self, event) -> None:
-        """Left click: play from the clicked point (jumps there if already playing)."""
-        width = self.wave.winfo_width()
-        if not self.player.is_loaded or width <= 1:
-            return
-        fraction = min(max(event.x / width, 0.0), 1.0)
-        self._safe_play(fraction * self.player.duration_s)
-        self._refresh_play_button()
-
-    def _safe_play(self, start_s: float | None = None) -> None:
-        try:
-            self.player.play(start_s)
-        except Exception as exc:  # noqa: BLE001 - e.g. device busy / unsupported rate
-            messagebox.showerror(APP_NAME, f"Playback failed:\n{exc}")
-
-    def _refresh_play_button(self) -> None:
-        self.play_button.configure(text="Stop  (Space)" if self.player.is_playing else "Play  (Space)")
-
-    def _open_output_folder(self) -> None:
-        folder = Path(self.out_var.get())
-        if folder.is_dir():
-            os.startfile(folder)  # Windows: open in Explorer
-        else:
-            messagebox.showinfo(APP_NAME, f"The output folder does not exist yet:\n{folder}")
-
-    # ------------------------------------------------------------- waveform
-
-    def _draw_waveform(self) -> None:
-        """Redraw the selected output's waveform to fit the canvas."""
-        canvas = self.wave
-        canvas.delete("all")
-        width, height = canvas.winfo_width(), canvas.winfo_height()
-        mid = height / 2
-        canvas.create_line(0, mid, width, mid, fill=WAVE_MIDLINE)
-
-        if self.preview_data is None or width <= 1:
-            return
-
-        result = self.preview_result
-        duration = result.output_seconds if result is not None else 0.0
-
-        # Crossfade region: the only part of the loop that was edited.
-        if result is not None and result.output_seconds > 0:
-            x0 = result.crossfade_start_s / result.output_seconds * width
-            x1 = result.crossfade_end_s / result.output_seconds * width
-            canvas.create_rectangle(x0, 0, x1, height, fill=WAVE_XFADE, outline="")
-            canvas.create_text(x0 + 4, height - 4, text="crossfade", anchor="sw", fill="gray", font=("Segoe UI", 8))
-
-        # Envelope as one polygon: top edge left->right, bottom edge right->left.
-        lows, highs = preview.compute_peaks(self.preview_data, width)
-        scale = mid * 0.95
-        xs = [i * width / len(highs) for i in range(len(highs))]
-        top = [(x, mid - h * scale) for x, h in zip(xs, highs)]
-        bottom = [(x, mid - lo * scale) for x, lo in zip(reversed(xs), reversed(lows))]
-        canvas.create_polygon(*top, *bottom, fill=WAVE_FG, outline=WAVE_FG)
-
-        canvas.create_line(0, 0, 0, height, fill=PLAYHEAD, width=2, tags="playhead")
-        self._move_playhead()
-        if result is not None:
-            self.status_var.set(
-                f"{result.output_path.name}  |  {duration:.2f} s  |  click the waveform to play from there, "
-                f"Space = play/stop, orange = crossfade"
-            )
-
-    def _move_playhead(self) -> None:
-        width, height = self.wave.winfo_width(), self.wave.winfo_height()
-        duration = self.player.duration_s
-        if duration <= 0:
-            return
-        x = self.player.position_s / duration * width
-        self.wave.coords("playhead", x, 0, x, height)
-
-    def _update_playhead(self) -> None:
-        if self.player.is_playing:
-            self._move_playhead()
-        self.root.after(PLAYHEAD_REFRESH_MS, self._update_playhead)
-
-    # --------------------------------------------------------------- closing
-
     def _on_close(self) -> None:
-        self.player.close()  # stop the audio stream before the window goes away
+        self.playback.close()  # stop the audio stream before the window goes away
         self.root.destroy()
 
 

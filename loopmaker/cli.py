@@ -13,7 +13,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import APP_NAME, __version__, audio_io, core, loudness, naming, pipeline, presets, quality, variations
+from . import APP_NAME, __version__, audio_io, batch, core, loudness, naming, pipeline, presets, quality, variations
 
 # Options that only make sense with --preset Custom.
 _CUSTOM_OPTIONS = ("sample_rate", "bit_depth", "file_format", "dither")
@@ -94,6 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--report-window", type=float, default=quality.DEFAULT_WINDOW_MS, metavar="MS",
         help="window used by the loop-quality report in ms (default: %(default)g)",
     )
+    misc.add_argument(
+        "--on-problem", choices=batch.POLICIES, default=batch.DEFAULT_POLICY,
+        help="skip: skip files with errors and log why; clamp: auto-fix crossfade/variations and log each change; "
+             "stop: stop the batch at the first file that cannot be processed (default: %(default)s)",
+    )
+    misc.add_argument("--report", type=Path, default=None, metavar="TXT", help="also write the batch report to this file")
     misc.add_argument("--dry-run", action="store_true", help="validate and preview output names, write nothing")
     misc.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     return parser
@@ -160,30 +166,43 @@ def main(argv: list[str] | None = None) -> int:
         print("No audio files to process.", file=sys.stderr)
         return 1
 
-    # Preview the output names before anything is written.
+    # Validate every file and preview the output names before anything is written.
+    validations = batch.validate_batch([batch.FileJob(p) for p in files], settings, args.on_problem)
     print(f"Output: {spec.describe()} -> {Path(args.out)}")
-    taken: set[Path] = set()
-    for index, path in enumerate(files, start=1):
-        try:
-            names = [p.name for p in pipeline.output_paths_for(path, settings, index, len(files), taken)]
-        except ValueError as exc:
-            names = [f"<{exc}>"]
-        print(f"  {path.name}  ->  {', '.join(names)}")
+    for v in validations:
+        names = ", ".join(p.name for p in v.output_paths) or "-"
+        print(f"  [{v.status:^7}] {v.job.path.name}  ->  {names}")
+        for line in v.errors:
+            print(f"            error: {line}")
+        for line in v.warnings:
+            print(f"            warning: {line}")
+        for line in v.changes:
+            print(f"            auto-clamp: {line}")
+    print(batch.summary_line(validations))
     print()
     if args.dry_run:
         return 0
 
-    failures = 0
-    for path, result in pipeline.process_batch(files, settings):
-        if isinstance(result, Exception):
-            failures += 1
-            print(f"FAILED  {path}: {result}\n", file=sys.stderr)
+    def on_event(kind: str, _index: int, payload: object) -> None:
+        if kind != "done":
+            return
+        report_file: batch.FileReport = payload
+        if report_file.status == batch.WRITTEN:
+            for output in report_file.outputs:
+                print(output.format() + "\n")
         else:
-            print(result.format() + "\n")
+            print(f"{report_file.status.upper():<8} {report_file.input_path.name}: {report_file.reason}\n", file=sys.stderr)
 
-    done = len(files) - failures
-    print(f"Done: {done} written, {failures} failed, {len(skipped)} skipped.")
-    return 0 if failures == 0 and not skipped else 1
+    report = batch.run_batch(validations, settings, args.on_problem, on_event)
+    print("=" * 72)
+    print(report.format())
+    if args.report:
+        report.export(args.report)
+        print(f"Report written to {args.report}")
+
+    counts = report.counts
+    clean = counts[batch.WRITTEN] == len(files) and not skipped
+    return 0 if clean else 1
 
 
 if __name__ == "__main__":

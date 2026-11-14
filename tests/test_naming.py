@@ -86,7 +86,8 @@ def test_cli_preview_and_bad_template(tmp_path, capsys):
     sf.write(str(src), np.random.default_rng(0).standard_normal(48_000 * 2) * 0.1, 48_000)
     out = tmp_path / "out"
 
-    assert cli.main([str(src), "--template", "AMB_{name}_{index}_loop", "--out", str(out), "--dry-run"]) == 0
+    assert cli.main([str(src), "--template", "AMB_{name}_{index}_loop", "--crossfade", "0.5",
+                     "--out", str(out), "--dry-run"]) == 0
     assert "AMB_Desert_Wind_01_loop.wav" in capsys.readouterr().out
     assert not out.exists()  # dry run writes nothing
 

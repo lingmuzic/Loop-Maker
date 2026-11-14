@@ -102,11 +102,12 @@ def test_cli_end_to_end(tmp_path, capsys):
     assert code == 0
     assert (out / "wind_loop.wav").exists()
     printed = capsys.readouterr().out
-    assert "Loop-point check" in printed and "Done: 1 written" in printed
+    assert "Loop-point check" in printed and "Result: 1 written" in printed
+    assert "1 file: 1 OK, 0 warnings, 0 cannot be processed" in printed
 
 
 def test_cli_reports_failure_with_nonzero_exit(tmp_path, capsys):
     src = write_noise(tmp_path / "short.wav", seconds=1.0)
     code = cli.main([str(src), "--crossfade", "3", "--out", str(tmp_path / "out")])
     assert code == 1
-    assert "Crossfade too long" in capsys.readouterr().err
+    assert "crossfade 3.0 s exceeds half the file length (0.50 s)" in capsys.readouterr().err

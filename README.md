@@ -152,10 +152,16 @@ python -m loopmaker "D:\Recordings\Ambience"
 | `--variations N` | `0` (off) | Write N = 3..5 rotated loop variations per input. |
 | `--min-spacing PCT` | `12` | Minimum distance between variation split points, % of file length. |
 | `--short-warning SECONDS` | `15` | Warn that variations may sound alike below this length. |
+| `--on-problem` | `skip` | `skip` (skip and log), `clamp` (auto-clamp), `stop` (stop the batch). See *Batch validation*. |
+| `--report TXT` | off | Also write the batch report to a text file. |
 | `--dry-run` | off | Validate and preview output names, write nothing. |
 | `--report-window MS` | `50` | Window used by the quality report. |
 
-Exit code is `0` when every file succeeded, `1` if any file failed or was skipped.
+Before processing, the CLI prints every file's status (OK / warning / error, with reasons)
+and planned output names, then a summary line such as
+`12 files: 9 OK, 2 warnings, 1 cannot be processed`. After processing it prints the batch
+report. Exit code: `0` when every file was written, `1` if any was skipped, failed or not
+run, `2` for invalid settings (bad preset, template ...).
 
 ### GUI
 
@@ -166,9 +172,28 @@ from the project's `.venv` without a console window). Or from a terminal:
 .venv\Scripts\python.exe -m loopmaker.gui
 ```
 
-Drag files or folders onto the list (or use the buttons), set the crossfade, curve,
-safety fade and output folder, then press **Process**. The log shows the same quality
-report as the CLI. The GUI calls exactly the same `pipeline.process_batch()` as the CLI.
+Drag files or folders onto the **Files** table (or use the buttons), set the **Global
+settings**, check the status column and the summary line, then press **Process**. The GUI
+uses exactly the same `batch.validate_batch()` / `batch.run_batch()` as the CLI.
+
+**Files table.** One row per file:
+
+| Column | Meaning |
+|---|---|
+| ☐ | Select rows for *Remove selected* and for the max-crossfade hint |
+| File, Length, Format | Read from the file header (hover the name for the full path) |
+| **Crossfade**, **Var.** | Per-file overrides. Empty = global setting. An overridden cell turns **yellow**; an invalid value turns **red** and makes the row an error |
+| Output | First output name from the template (`+3` = more variations; hover for all) |
+| **Status** | **OK** / **warning** / **error**. Hover for the reasons, e.g. *"crossfade 3.0 s exceeds half the file length (1.00 s)"* |
+| Progress | queued → processing... → done (N files) / skipped / failed / not run (hover for details) |
+
+- **Live validation:** every change to a global setting or an override re-validates all rows
+  within ~150 ms. Nothing waits for the Process button.
+- **Max crossfade hint** next to the crossfade field: the longest crossfade that suits all
+  files, or only the ticked ones (*"max 1.00 s for 2 selected"*). It accounts for variations.
+- **Summary line** next to Process: *"12 files: 9 OK, 2 warnings, 1 cannot be processed"*.
+- After the run, each row shows its result, every output appears in *Test playback*, the
+  log holds the full report, and **Export report...** saves it as a text file.
 
 **Test playback.** After processing, every output appears in the *Test playback* list
 with its verdict. Select one to see its waveform; the crossfade region is highlighted
@@ -352,6 +377,54 @@ exact option names and where they live in the Property Editor depend on your Wwi
 version: **check in Wwise** rather than relying on the wording here. The same idea applies
 in other engines: switch between variations only through a crossfade.
 
+## Batch validation and "On problem"
+
+Every file is validated **separately and before anything is written** (from its header
+only, so it is instant). Checks include: unreadable file, crossfade longer than half the
+file, too short for the requested variations, short-source variation warning, files too
+short or too wide for loudness normalisation, output-name collisions, an output that would
+overwrite its input, and invalid per-file overrides.
+
+| Status | Meaning |
+|---|---|
+| **OK** | Nothing to report |
+| **warning** | Will be processed. Warnings **never block** processing |
+| **error** | Cannot be processed as configured. Blocks **only that file**, never the batch (except with *stop*) |
+
+**On problem** (GUI dropdown, `--on-problem`):
+
+- **skip and log** (default): files with errors are skipped and the reason is logged; the rest
+  of the batch runs.
+- **auto-clamp**: fix what can be fixed and log **every** change, e.g.
+  `Rain_short.wav: crossfade 3.0 -> 1.0 s`. The crossfade is shortened to the longest value the
+  file allows. With variations, the crossfade is shortened first so the requested variations
+  are kept. Only if that would leave less than 50 ms is the variation count reduced (down
+  to "off", the standard loop). Clamped files show as **warning**. Things that cannot be
+  clamped (unreadable file, invalid override) stay errors and are skipped.
+- **stop the batch**: process files in order and stop at the first file that cannot be
+  processed or that fails while processing. Later files are reported as *not run*.
+
+A file that passes validation but still fails while processing (e.g. it was deleted
+meanwhile) is reported as *failed*; under *skip* and *auto-clamp* the batch continues.
+
+**Batch report** (log, CLI output, *Export report...*, `--report`): the settings, the
+pre-run summary, and per file: status, crossfade actually used, variations, each output
+path with its **seam score**, curve and loudness, clamp changes and warnings, or the
+reason it was skipped/failed.
+
+### Seam score
+
+A single 0-100 heuristic per output (not a perceptual model), shown in reports and in the
+Test playback list. It starts at 100 and subtracts:
+
+- 25 points per unit the **wrap jump** exceeds an ordinary sample step,
+- 10 points per dB of **head/tail level difference** beyond 1 dB,
+- 10 points per dB of **crossfade dip/bulge** beyond 1 dB. This is the level of the centre of the
+  crossfade compared with the audio just before and after it, which catches a wrong curve
+  (about ±3 dB).
+
+The 1 dB allowance covers the natural level wobble of ambience between neighbouring windows.
+
 ## Output files
 
 - Written to the output folder with the name from the template. **The input is never
@@ -406,10 +479,13 @@ loopmaker/
   naming.py     file naming templates: validation and rendering
   variations.py split-point selection (RMS valleys, spacing, length checks)
   audio_io.py   soundfile read/write, subtype mapping, input collection
-  pipeline.py   file-level + batch processing shared by CLI and GUI
+  pipeline.py   file-level processing: resample, loop(s), measure, write
+  batch.py      per-file validation, On-problem policy, batch run + report
   preview.py    waveform peaks + seamless looping playback (no UI code)
   cli.py        argparse front-end   (python -m loopmaker)
-  gui.py        Tkinter front-end    (python -m loopmaker.gui)
+  gui.py        Tkinter main window  (python -m loopmaker.gui)
+  gui_table.py  file table widget: overrides, status, tooltips, progress
+  gui_playback.py  Test playback panel: output list, waveform, audition
 tests/          pytest suite using synthetic noise and sine signals
 scripts/        README figure generator
 ```
@@ -422,7 +498,9 @@ python -m pytest
 
 The suite uses only synthetic audio (seeded noise, sines, DC) and checks output length,
 continuity at the wrap point, the too-long-crossfade error, multichannel behaviour,
-format preservation, batch behaviour and the CLI.
+format preservation, presets/dither/resampling, naming templates, the preset-file fallback,
+loop variations (spacing, rotation, seamless wraps, length errors), per-file validation and
+the On-problem policies, batch reports and the CLI.
 
 ## Credits
 

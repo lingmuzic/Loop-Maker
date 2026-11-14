@@ -123,3 +123,51 @@ def compare(
         after=measure_wrap(looped, sample_rate, window_ms),
         window_ms=window_ms,
     )
+
+
+# --------------------------------------------------------------------------
+# The middle seam (crossfade) and a single summary score
+# --------------------------------------------------------------------------
+
+#: Level wobble (dB) that ambience naturally has between neighbouring
+#: half-second windows; deviations within it cost nothing in the score.
+SCORE_FREE_DB = 1.0
+
+
+def crossfade_level_db(looped: np.ndarray, start: int, length: int) -> float:
+    """Level of the crossfade centre relative to the material around it, in dB.
+
+    Compares the RMS of the middle half of the crossfade with the RMS of the
+    audio just before and just after it (each up to half a crossfade long).
+    About 0 dB means no dip or bulge; a wrong curve shows up as roughly
+    -3 dB (linear on noise) or +3 dB (equal power on a steady tone).
+    """
+    data = np.asarray(looped, dtype=np.float64)
+    n = data.shape[0]
+    quarter = max(1, length // 4)
+    centre = start + length // 2
+    inside = data[max(0, centre - quarter):min(n, centre + quarter)]
+    before = data[max(0, start - 2 * quarter):start]
+    after = data[min(n, start + length):min(n, start + length + 2 * quarter)]
+    around = np.concatenate([before, after]) if (before.size or after.size) else inside
+
+    def rms(x: np.ndarray) -> float:
+        return float(np.sqrt(np.mean(np.square(x)))) if x.size else 0.0
+
+    return 20.0 * np.log10(max(rms(inside), _EPS) / max(rms(around), _EPS))
+
+
+def seam_score(wrap: WrapMetrics, crossfade_db: float) -> int:
+    """One 0-100 number summarising both seams (heuristic, documented in the README).
+
+    Starts at 100 and subtracts:
+    * 25 points per unit the wrap jump exceeds an ordinary sample step,
+    * 10 points per dB of head/tail level difference beyond 1 dB,
+    * 10 points per dB of crossfade dip/bulge beyond 1 dB.
+    """
+    penalty = (
+        25.0 * max(0.0, wrap.jump_ratio - 1.0)
+        + 10.0 * max(0.0, abs(wrap.rms_diff_db) - SCORE_FREE_DB)
+        + 10.0 * max(0.0, abs(crossfade_db) - SCORE_FREE_DB)
+    )
+    return int(round(min(100.0, max(0.0, 100.0 - penalty))))
