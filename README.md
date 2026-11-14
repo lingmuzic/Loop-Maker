@@ -1,5 +1,7 @@
 # Loop Maker
 
+> Built with AI assistance: I designed the tool and specified the algorithm from my own sound design workflow, and Claude Code wrote the code under my direction. See [Credits](#credits).
+
 Turn ambience recordings into **seamlessly loopable** audio files, the same way a
 sound designer does it by hand in a DAW, but in batch, with a quality check.
 
