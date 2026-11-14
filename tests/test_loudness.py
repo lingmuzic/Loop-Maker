@@ -79,7 +79,7 @@ def test_batch_ends_up_level_matched(tmp_path):
         sources.append(path)
 
     settings = pipeline.LoopSettings(crossfade_s=1.0, out_dir=tmp_path / "out", normalize_lufs=-24.0)
-    results = [r for _, r in pipeline.process_batch(sources, settings)]
+    results = [r.outputs[0] for _, r in pipeline.process_batch(sources, settings)]
 
     for result in results:
         written, _ = sf.read(str(result.output_path))
@@ -90,7 +90,7 @@ def test_batch_ends_up_level_matched(tmp_path):
 def test_normalisation_off_by_default(tmp_path):
     path = tmp_path / "a.wav"
     sf.write(str(path), np.random.default_rng(0).standard_normal(SR * 4) * 0.05, SR)
-    result = pipeline.process_file(path, pipeline.LoopSettings(crossfade_s=1.0, out_dir=tmp_path / "out"))
+    result = pipeline.process_file(path, pipeline.LoopSettings(crossfade_s=1.0, out_dir=tmp_path / "out")).outputs[0]
     assert result.normalization is None
 
 
@@ -98,6 +98,6 @@ def test_unmeasurable_file_is_still_written_with_a_note(tmp_path):
     path = tmp_path / "silent.wav"
     sf.write(str(path), np.zeros(SR * 2), SR)
     settings = pipeline.LoopSettings(crossfade_s=0.5, out_dir=tmp_path / "out", normalize_lufs=-23)
-    result = pipeline.process_file(path, settings)
+    result = pipeline.process_file(path, settings).outputs[0]
     assert result.output_path.exists()
     assert any("not loudness-normalised" in note for note in result.notes)

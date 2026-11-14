@@ -54,7 +54,7 @@ def test_crossfade_region_reported_in_output_time(tmp_path):
     sr = 1000
     src = tmp_path / "a.wav"
     sf.write(str(src), np.random.default_rng(0).standard_normal(5001) * 0.1, sr)  # odd length
-    result = pipeline.process_file(src, pipeline.LoopSettings(crossfade_s=1.0, out_dir=tmp_path / "out"))
+    result = pipeline.process_file(src, pipeline.LoopSettings(crossfade_s=1.0, out_dir=tmp_path / "out")).outputs[0]
     # B has 2501 frames, so the crossfade covers 1.501 s .. 2.501 s of the output.
     assert result.crossfade_start_s == pytest.approx(1.501)
     assert result.crossfade_end_s == pytest.approx(2.501)

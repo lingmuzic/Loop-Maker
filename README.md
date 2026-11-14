@@ -145,6 +145,11 @@ python -m loopmaker "D:\Recordings\Ambience"
 | `--peak-ceiling DBTP` | `-1` | True-peak ceiling for `--normalize`. |
 | `--safety-fade MS` | `5` | Start/end fade in milliseconds; `0` disables it. |
 | `--out FOLDER` | `output` | Output folder (created if needed). |
+| `--preset NAME` | `Custom` | Output preset: `Custom`, `Wwise`, `Unreal`, `Unity`, `Godot`, or one from `presets.json`. |
+| `--sample-rate`, `--bit-depth`, `--format`, `--dither` | source / source / WAV / auto | Custom preset fields. |
+| `--presets JSON` | `presets.json` | Preset file to load. |
+| `--template`, `--category`, `--suffix` | `{name}_{suffix}`, `AMB`, `loop` | File naming. |
+| `--dry-run` | off | Validate and preview output names, write nothing. |
 | `--report-window MS` | `50` | Window used by the quality report. |
 
 Exit code is `0` when every file succeeded, `1` if any file failed or was skipped.
@@ -189,21 +194,126 @@ audio, sr = sf.read("wind.wav")          # (frames,) or (frames, channels)
 looped = make_loop(audio, sr, crossfade_s=3.0, curve="equal_power", safety_fade_s=0.005)
 ```
 
+## Output presets
+
+Choose a preset in the GUI's **Preset** dropdown or with `--preset NAME`:
+
+| Preset | Sample rate | Bit depth | Format | Dither |
+|---|---|---|---|---|
+| **Custom** (default) | source / 44.1 / 48 / 96 kHz | source / 16 / 24 / 32-bit float | WAV / FLAC / OGG | auto |
+| **Wwise** | 48 kHz | 24-bit | WAV | auto |
+| **Unreal** | 48 kHz | 16-bit | WAV | always |
+| **Unity** | 48 kHz | source | WAV | auto |
+| **Godot** | 48 kHz | source | WAV | auto |
+
+```bash
+python -m loopmaker recordings\ --preset Wwise
+```
+
+```bash
+python -m loopmaker rain.wav --preset Custom --sample-rate 44100 --bit-depth 16 --format FLAC
+```
+
+- **Custom with all fields on "source"** reproduces the old behaviour: same rate, same
+  bit depth, WAV.
+- **Unity and Godot** only specify 48 kHz WAV, so they keep the source bit depth. Check what
+  your engine version imports (e.g. 24-bit WAV support) and edit the preset if needed.
+- **OGG** (Vorbis) is offered only when the installed libsndfile can write it. It is lossy,
+  so bit depth does not apply. **FLAC** stores 16/24-bit only; FLAC + 32-bit float is
+  rejected with a clear message.
+- The CLI's `--sample-rate`, `--bit-depth`, `--format` and `--dither` only apply with
+  `--preset Custom`. Combining them with a named preset is an error rather than a silent
+  override, so a "Wwise" file is always exactly the Wwise format.
+
+### Resampling
+
+When the preset changes the sample rate, the **source is resampled before looping** with a
+polyphase filter (`scipy.signal.resample_poly`, exact rational ratio such as 160/147 for
+44.1 → 48 kHz, Kaiser window β = 9, about 90 dB stop-band attenuation). Resampling first
+matters: the filter's edge transients land on the original file start and end, which end
+up inside the crossfade at near-zero gain, so the loop point stays clean. All lengths
+(crossfade, output) are then in the new rate.
+
+### Dither
+
+Integer 16/24-bit output is quantised by Loop Maker itself (not left to libsndfile), with
+optional **TPDF dither** (±1 LSB triangular noise). Dither modes:
+
+- `auto` (default): dither only when the bit depth is **reduced**: 24 → 16, float → 24, and so on.
+  A 16-bit source written as 16-bit is rounded without dither. That follows the "reduce" rule
+  literally, even though crossfading and gain technically requantise too.
+- `always`: dither every 16/24-bit output (used by the Unreal preset).
+- `never`: plain rounding.
+
+Dither noise is seeded from the output file name, so the same input and settings produce
+byte-identical files, which avoids noisy diffs when assets live in version control.
+Overloads are counted *before* dither and reported; dither itself can never wrap a sample
+around.
+
+### Preset file (`presets.json`)
+
+The named presets are stored in [`presets.json`](presets.json) in the project folder, which
+you can edit or extend:
+
+```json
+{
+  "version": 1,
+  "presets": {
+    "Wwise": {"sample_rate": 48000, "bit_depth": "24", "format": "WAV", "dither": "auto",
+              "description": "48 kHz, 24-bit WAV"}
+  }
+}
+```
+
+`sample_rate` and `bit_depth` may be `"source"`. If the file is missing or not valid JSON, the
+built-in presets are used and a warning is shown in the GUI log or on stderr. A single invalid
+entry is skipped (and named in the warning) while the rest still load. `Custom` is
+reserved. Use `--presets other.json` to load a different file.
+
+## File naming
+
+The **Name template** field and `--template` build each output's name from tokens:
+
+| Token | Value |
+|---|---|
+| `{name}` | input file name without extension |
+| `{category}` | the Category field / `--category` (default `AMB`) |
+| `{index}` | position in the batch: `01`, `02` ... (3 digits for 100+ files) |
+| `{suffix}` | the Suffix field / `--suffix` (default `loop`) |
+
+```bash
+python -m loopmaker "Desert_Wind.wav" --template "AMB_{name}_{index}_loop"
+```
+
+That command writes `AMB_Desert_Wind_01_loop.wav`. The default template `{name}_{suffix}`
+gives the familiar `<name>_loop.wav`.
+
+- **Validation:** unknown tokens, unbalanced braces, characters Windows forbids
+  (`< > : " / \ | ? *`), names ending in a space or dot, and reserved names such as `CON`
+  are rejected before anything is processed. The GUI shows the reason in red under the
+  template field, and the CLI exits with code 2.
+- **Preview:** the GUI shows the resulting names live. The CLI prints every
+  `input -> output` name before processing, and `--dry-run` stops after that preview.
+- `{name}` keeps the original spelling (spaces included); only illegal characters become `_`.
+- A template without `{name}` or `{index}` gets a warning. Colliding names in a batch get
+  `_2`, `_3` ... appended so nothing is overwritten.
+
 ## Output files
 
-- Written as `<output folder>/<name>_loop.wav`. **The input is never overwritten**
-  (this is checked explicitly before writing).
-- Sample rate and channel count are always preserved.
-- Bit depth is preserved: PCM 8/16/24/32-bit and 32/64-bit float WAV/FLAC/AIFF inputs
-  are written with the same WAV subtype. Inputs with no lossless WAV equivalent (e.g. Ogg
-  Vorbis) are written as 24-bit PCM, and the report says so.
+- Written to the output folder with the name from the template. **The input is never
+  overwritten** (this is checked explicitly before writing).
+- Channel count is always preserved. Sample rate and bit depth are preserved unless a preset
+  changes them.
+- With bit depth on "source": PCM 8/16/24/32-bit and 32/64-bit float inputs keep their
+  subtype. Inputs with no lossless equivalent in the chosen format (e.g. Ogg Vorbis → WAV,
+  float → FLAC) are written as 24-bit PCM, and the report says so.
 
 ## Design decisions and defaults
 
 Choices I made where the spec left room. They are easy to change.
 
-- **Output is always WAV**, even for FLAC input, because WAV is what game engines and
-  middleware import most directly.
+- **Default output is WAV**, even for FLAC input, because WAV is what game engines and
+  middleware import most directly. FLAC and OGG are available through the Custom preset.
 - **Default crossfade is 2.0 s.** Long enough to hide the seam in most ambience,
   short enough to work on files of 4 s and up.
 - **Crossfade must be > 0.** A 0 s crossfade would leave a hard cut in the middle,
@@ -237,7 +347,10 @@ loopmaker/
   core.py       pure numpy DSP: make_loop(), crossfade curves, safety fades
   quality.py    loop-point measurements and report formatting
   loudness.py   BS.1770 loudness, true peak, normalisation gain
-  audio_io.py   soundfile read/write, bit-depth mapping, input collection
+  convert.py    resampling and TPDF-dithered quantisation (pure DSP)
+  presets.py    output presets, presets.json loading with built-in fallback
+  naming.py     file naming templates: validation and rendering
+  audio_io.py   soundfile read/write, subtype mapping, input collection
   pipeline.py   file-level + batch processing shared by CLI and GUI
   preview.py    waveform peaks + seamless looping playback (no UI code)
   cli.py        argparse front-end   (python -m loopmaker)

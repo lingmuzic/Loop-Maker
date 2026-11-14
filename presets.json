@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "presets": {
+    "Wwise": {
+      "sample_rate": 48000,
+      "bit_depth": "24",
+      "format": "WAV",
+      "dither": "auto",
+      "description": "48 kHz, 24-bit WAV"
+    },
+    "Unreal": {
+      "sample_rate": 48000,
+      "bit_depth": "16",
+      "format": "WAV",
+      "dither": "always",
+      "description": "48 kHz, 16-bit WAV, always dithered"
+    },
+    "Unity": {
+      "sample_rate": 48000,
+      "bit_depth": "source",
+      "format": "WAV",
+      "dither": "auto",
+      "description": "48 kHz WAV, source bit depth"
+    },
+    "Godot": {
+      "sample_rate": 48000,
+      "bit_depth": "source",
+      "format": "WAV",
+      "dither": "auto",
+      "description": "48 kHz WAV, source bit depth"
+    }
+  }
+}

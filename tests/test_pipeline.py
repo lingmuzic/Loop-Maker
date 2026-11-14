@@ -32,7 +32,7 @@ def write_noise(path, seconds=4.0, channels=2, subtype="PCM_24", seed=0):
 def test_preserves_rate_channels_and_bit_depth(tmp_path, name, channels, subtype):
     src = write_noise(tmp_path / name, channels=channels, subtype=subtype)
     settings = pipeline.LoopSettings(crossfade_s=1.0, out_dir=tmp_path / "out")
-    result = pipeline.process_file(src, settings)
+    result = pipeline.process_file(src, settings).outputs[0]
 
     info = sf.info(str(result.output_path))
     assert result.output_path.name == f"{src.stem}_loop.wav"
@@ -53,7 +53,7 @@ def test_input_file_is_never_modified(tmp_path):
 def test_refuses_to_overwrite_input(tmp_path):
     src = write_noise(tmp_path / "x_loop.wav")
     with pytest.raises(ValueError, match="overwrite"):
-        pipeline.process_file(src, pipeline.LoopSettings(crossfade_s=1.0), output_path=src)
+        pipeline.process_file(src, pipeline.LoopSettings(crossfade_s=1.0), output_paths=[src])
 
 
 def test_batch_from_folder_continues_after_a_failure(tmp_path):
@@ -79,7 +79,7 @@ def test_batch_avoids_output_name_collisions(tmp_path):
     b = write_noise(tmp_path / "rain.flac")
     out = tmp_path / "out"
     results = [r for _, r in pipeline.process_batch([a, b], pipeline.LoopSettings(crossfade_s=1.0, out_dir=out))]
-    assert {r.output_path.name for r in results} == {"rain_loop.wav", "rain_loop_2.wav"}
+    assert {r.outputs[0].output_path.name for r in results} == {"rain_loop.wav", "rain_loop_2.wav"}
 
 
 def test_clipping_is_reported_for_integer_output(tmp_path):
@@ -89,7 +89,7 @@ def test_clipping_is_reported_for_integer_output(tmp_path):
     src = tmp_path / "dc.wav"
     sf.write(str(src), np.full(SR * 2, 0.99), SR, subtype="PCM_16")
     settings = pipeline.LoopSettings(crossfade_s=0.5, curve="equal_power", out_dir=tmp_path / "out")
-    result = pipeline.process_file(src, settings)
+    result = pipeline.process_file(src, settings).outputs[0]
     assert any("clipped" in note for note in result.notes)
     written, _ = sf.read(str(result.output_path))
     assert np.max(np.abs(written)) <= 1.0

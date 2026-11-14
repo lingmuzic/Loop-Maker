@@ -26,7 +26,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from . import APP_NAME, audio_io, core, loudness, pipeline, preview
+from . import APP_NAME, audio_io, core, loudness, naming, pipeline, presets, preview
 
 try:  # Optional dependency: drag-and-drop support.
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -77,9 +77,22 @@ class LoopMakerApp:
         self.ceiling_var = tk.StringVar(value=f"{loudness.DEFAULT_PEAK_CEILING_DBTP:g}")
         self.status_var = tk.StringVar(value="Process some files, then pick an output to audition it.")
 
+        # Output presets (user-editable JSON with built-in fallback) and naming.
+        self.presets, self.preset_warnings = presets.load_presets()
+        self.preset_var = tk.StringVar(value=presets.CUSTOM)
+        self.rate_var = tk.StringVar(value=presets.SOURCE)
+        self.depth_var = tk.StringVar(value=presets.SOURCE)
+        self.format_var = tk.StringVar(value="WAV")
+        self.template_var = tk.StringVar(value=naming.DEFAULT_TEMPLATE)
+        self.category_var = tk.StringVar(value=naming.DEFAULT_CATEGORY)
+        self.suffix_var = tk.StringVar(value=naming.DEFAULT_SUFFIX)
+        self.name_preview_var = tk.StringVar()
+
         self._build_layout()
         self._enable_drag_and_drop()
         self._bind_shortcuts()
+        for warning in self.preset_warnings:
+            self._log(f"WARNING {warning}")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(100, self._drain_log_queue)
         self.root.after(PLAYHEAD_REFRESH_MS, self._update_playhead)
@@ -152,9 +165,45 @@ class LoopMakerApp:
         ttk.Entry(norm_row, textvariable=self.ceiling_var, width=7).pack(side=tk.LEFT)
         ttk.Label(norm_row, text="dBTP").pack(side=tk.LEFT, **pad)
 
-        ttk.Label(frame, text="Output folder").grid(row=4, column=0, sticky="w", **pad)
-        ttk.Entry(frame, textvariable=self.out_var).grid(row=4, column=1, sticky="ew", **pad)
-        ttk.Button(frame, text="Browse...", command=self._choose_output).grid(row=4, column=2, **pad)
+        # Output preset + Custom fields (editable only when the preset is Custom).
+        preset_row = ttk.Frame(frame)
+        preset_row.grid(row=4, column=0, columnspan=3, sticky="w")
+        ttk.Label(preset_row, text="Preset").pack(side=tk.LEFT, **pad)
+        ttk.Combobox(
+            preset_row, textvariable=self.preset_var, values=[presets.CUSTOM, *self.presets],
+            state="readonly", width=10,
+        ).pack(side=tk.LEFT)
+        self.custom_widgets = []
+        for label, var, values in [
+            ("Sample rate", self.rate_var, [presets.SOURCE, *map(str, presets.SAMPLE_RATES)]),
+            ("Bit depth", self.depth_var, [presets.SOURCE, *presets.BIT_DEPTHS]),
+            ("Format", self.format_var, list(presets.available_formats())),
+        ]:
+            ttk.Label(preset_row, text=label).pack(side=tk.LEFT, **pad)
+            box = ttk.Combobox(preset_row, textvariable=var, values=values, state="readonly", width=8)
+            box.pack(side=tk.LEFT)
+            self.custom_widgets.append(box)
+
+        # Naming template + live preview of the resulting file names.
+        naming_row = ttk.Frame(frame)
+        naming_row.grid(row=5, column=0, columnspan=3, sticky="ew")
+        ttk.Label(naming_row, text="Name template").pack(side=tk.LEFT, **pad)
+        ttk.Entry(naming_row, textvariable=self.template_var, width=28).pack(side=tk.LEFT)
+        ttk.Label(naming_row, text="{category}").pack(side=tk.LEFT, **pad)
+        ttk.Entry(naming_row, textvariable=self.category_var, width=8).pack(side=tk.LEFT)
+        ttk.Label(naming_row, text="{suffix}").pack(side=tk.LEFT, **pad)
+        ttk.Entry(naming_row, textvariable=self.suffix_var, width=8).pack(side=tk.LEFT)
+        self.name_preview = ttk.Label(frame, textvariable=self.name_preview_var, foreground="gray")
+        self.name_preview.grid(row=6, column=0, columnspan=3, sticky="w", padx=8)
+
+        ttk.Label(frame, text="Output folder").grid(row=7, column=0, sticky="w", **pad)
+        ttk.Entry(frame, textvariable=self.out_var).grid(row=7, column=1, sticky="ew", **pad)
+        ttk.Button(frame, text="Browse...", command=self._choose_output).grid(row=7, column=2, **pad)
+
+        for var in (self.preset_var, self.template_var, self.category_var, self.suffix_var,
+                    self.rate_var, self.depth_var, self.format_var):
+            var.trace_add("write", lambda *_: self._on_output_settings_changed())
+        self._on_output_settings_changed()
 
     def _build_test_area(self, row: int, pad: dict) -> None:
         frame = ttk.LabelFrame(self.root, text="Test playback")
@@ -229,6 +278,7 @@ class LoopMakerApp:
                 self.file_list.insert(tk.END, f"{path.name}    ({path.parent})")
         for problem in problems:
             self._log(f"SKIPPED {problem}")
+        self._refresh_name_preview()
 
     def _on_drop(self, event) -> None:
         # tkinterdnd2 delivers a Tcl list; splitlist handles paths with spaces/braces.
@@ -246,10 +296,12 @@ class LoopMakerApp:
         for index in reversed(self.file_list.curselection()):
             self.file_list.delete(index)
             del self.files[index]
+        self._refresh_name_preview()
 
     def _clear_files(self) -> None:
         self.file_list.delete(0, tk.END)
         self.files.clear()
+        self._refresh_name_preview()
 
     def _choose_output(self) -> None:
         folder = filedialog.askdirectory(title="Choose output folder", initialdir=self.out_var.get())
@@ -271,13 +323,84 @@ class LoopMakerApp:
         if crossfade <= 0 or safety < 0:
             messagebox.showerror(APP_NAME, "Crossfade must be > 0 and safety fade must be >= 0.")
             return None
-        return pipeline.LoopSettings(
+        settings = pipeline.LoopSettings(
             crossfade_s=crossfade,
             curve=self.curve_var.get(),
             safety_fade_ms=safety,
             out_dir=Path(self.out_var.get()),
             normalize_lufs=target if self.normalize_var.get() else None,
             peak_ceiling_dbtp=ceiling,
+            output=self._current_output_spec(),
+            naming=self._current_naming(),
+        )
+        problems = settings.errors()
+        if problems:
+            messagebox.showerror(APP_NAME, "Please fix the settings first:\n\n" + "\n".join(problems))
+            return None
+        return settings
+
+    # ------------------------------------------------- output preset / naming
+
+    def _current_output_spec(self) -> presets.OutputSpec:
+        name = self.preset_var.get()
+        if name != presets.CUSTOM and name in self.presets:
+            return self.presets[name].spec
+        rate, depth = self.rate_var.get(), self.depth_var.get()
+        return presets.OutputSpec(
+            sample_rate=None if rate == presets.SOURCE else int(rate),
+            bit_depth=None if depth == presets.SOURCE else depth,
+            file_format=self.format_var.get(),
+        )
+
+    def _current_naming(self) -> naming.Naming:
+        return naming.Naming(self.template_var.get(), self.category_var.get(), self.suffix_var.get())
+
+    def _on_output_settings_changed(self) -> None:
+        """Sync the Custom fields with the preset and refresh the name preview."""
+        if getattr(self, "_syncing", False):
+            return  # writing the fields below re-triggers this callback
+        self._syncing = True
+        try:
+            name = self.preset_var.get()
+            is_custom = name == presets.CUSTOM or name not in self.presets
+            for box in self.custom_widgets:
+                box.configure(state="readonly" if is_custom else tk.DISABLED)
+            if not is_custom:  # show what the preset will do
+                spec = self.presets[name].spec
+                self.rate_var.set(str(spec.sample_rate) if spec.sample_rate else presets.SOURCE)
+                self.depth_var.set(spec.bit_depth or presets.SOURCE)
+                self.format_var.set(spec.file_format)
+        finally:
+            self._syncing = False
+        self._refresh_name_preview()
+
+    def _refresh_name_preview(self) -> None:
+        """Show the output names the current template gives (or why it is invalid)."""
+        if not hasattr(self, "name_preview"):
+            return
+        spec, names = self._current_output_spec(), self._current_naming()
+        problems = spec.errors() + names.errors()
+        if problems:
+            self.name_preview.configure(foreground="#d03b3b")
+            self.name_preview_var.set("Cannot process: " + "; ".join(problems))
+            return
+        settings = pipeline.LoopSettings(output=spec, naming=names, out_dir=Path(self.out_var.get()))
+        inputs = self.files[:3] or [Path("Example Recording.wav")]
+        taken: set[Path] = set()
+        try:
+            shown = [
+                pipeline.output_paths_for(p, settings, i, max(len(self.files), 1), taken)[0].name
+                for i, p in enumerate(inputs, start=1)
+            ]
+        except ValueError as exc:
+            self.name_preview.configure(foreground="#d03b3b")
+            self.name_preview_var.set(f"Cannot process: {exc}")
+            return
+        more = f"  (+{len(self.files) - 3} more)" if len(self.files) > 3 else ""
+        warnings = names.warnings()
+        self.name_preview.configure(foreground="#b4580f" if warnings else "gray")
+        self.name_preview_var.set(
+            "Output names: " + ", ".join(shown) + more + (f"   WARNING: {warnings[0]}" if warnings else "")
         )
 
     def _start_processing(self) -> None:
@@ -305,7 +428,8 @@ class LoopMakerApp:
                 failures += 1
                 self.log_queue.put(("log", f"FAILED  {path.name}: {result}\n"))
             else:
-                self.log_queue.put(("result", result))
+                for output in result.outputs:  # one input can produce several files
+                    self.log_queue.put(("result", output))
                 self.log_queue.put(("log", result.format() + "\n"))
         self.log_queue.put(("log", f"Done: {len(files) - failures} written, {failures} failed.\n"))
         self.log_queue.put(("done",))
