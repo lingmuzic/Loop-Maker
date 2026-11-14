@@ -26,7 +26,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from . import APP_NAME, audio_io, core, loudness, naming, pipeline, presets, preview
+from . import APP_NAME, audio_io, core, loudness, naming, pipeline, presets, preview, variations
 
 try:  # Optional dependency: drag-and-drop support.
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -87,6 +87,9 @@ class LoopMakerApp:
         self.category_var = tk.StringVar(value=naming.DEFAULT_CATEGORY)
         self.suffix_var = tk.StringVar(value=naming.DEFAULT_SUFFIX)
         self.name_preview_var = tk.StringVar()
+        self.variations_var = tk.StringVar(value="Off")
+        self.spacing_var = tk.StringVar(value=f"{variations.DEFAULT_MIN_SPACING * 100:g}")
+        self.short_warn_var = tk.StringVar(value=f"{variations.DEFAULT_SHORT_WARNING_S:g}")
 
         self._build_layout()
         self._enable_drag_and_drop()
@@ -183,6 +186,19 @@ class LoopMakerApp:
             box = ttk.Combobox(preset_row, textvariable=var, values=values, state="readonly", width=8)
             box.pack(side=tk.LEFT)
             self.custom_widgets.append(box)
+
+        # Loop variations.
+        var_row = ttk.Frame(frame)
+        var_row.grid(row=8, column=0, columnspan=3, sticky="w")
+        ttk.Label(var_row, text="Variations").pack(side=tk.LEFT, **pad)
+        ttk.Combobox(var_row, textvariable=self.variations_var, values=["Off", *map(str, variations.VARIATION_COUNTS)],
+                     state="readonly", width=5).pack(side=tk.LEFT)
+        ttk.Label(var_row, text="min spacing").pack(side=tk.LEFT, **pad)
+        ttk.Entry(var_row, textvariable=self.spacing_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(var_row, text="% of file     warn below").pack(side=tk.LEFT, **pad)
+        ttk.Entry(var_row, textvariable=self.short_warn_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(var_row, text="s").pack(side=tk.LEFT, **pad)
+        self.variations_var.trace_add("write", lambda *_: self._refresh_name_preview())
 
         # Naming template + live preview of the resulting file names.
         naming_row = ttk.Frame(frame)
@@ -317,8 +333,10 @@ class LoopMakerApp:
             safety = float(self.safety_var.get())
             target = float(self.target_lufs_var.get())
             ceiling = float(self.ceiling_var.get())
+            spacing = float(self.spacing_var.get()) / 100.0
+            short_warning = float(self.short_warn_var.get())
         except ValueError:
-            messagebox.showerror(APP_NAME, "Crossfade, safety fade, LUFS and dBTP fields must be numbers.")
+            messagebox.showerror(APP_NAME, "Crossfade, safety fade, LUFS, dBTP and variation fields must be numbers.")
             return None
         if crossfade <= 0 or safety < 0:
             messagebox.showerror(APP_NAME, "Crossfade must be > 0 and safety fade must be >= 0.")
@@ -332,6 +350,9 @@ class LoopMakerApp:
             peak_ceiling_dbtp=ceiling,
             output=self._current_output_spec(),
             naming=self._current_naming(),
+            variations=self._current_variations(),
+            min_spacing=spacing,
+            short_warning_s=short_warning,
         )
         problems = settings.errors()
         if problems:
@@ -351,6 +372,10 @@ class LoopMakerApp:
             bit_depth=None if depth == presets.SOURCE else depth,
             file_format=self.format_var.get(),
         )
+
+    def _current_variations(self) -> int:
+        value = self.variations_var.get()
+        return 0 if value == "Off" else int(value)
 
     def _current_naming(self) -> naming.Naming:
         return naming.Naming(self.template_var.get(), self.category_var.get(), self.suffix_var.get())
@@ -384,7 +409,8 @@ class LoopMakerApp:
             self.name_preview.configure(foreground="#d03b3b")
             self.name_preview_var.set("Cannot process: " + "; ".join(problems))
             return
-        settings = pipeline.LoopSettings(output=spec, naming=names, out_dir=Path(self.out_var.get()))
+        settings = pipeline.LoopSettings(output=spec, naming=names, out_dir=Path(self.out_var.get()),
+                                         variations=self._current_variations())
         inputs = self.files[:3] or [Path("Example Recording.wav")]
         taken: set[Path] = set()
         try:

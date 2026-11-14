@@ -149,6 +149,9 @@ python -m loopmaker "D:\Recordings\Ambience"
 | `--sample-rate`, `--bit-depth`, `--format`, `--dither` | source / source / WAV / auto | Custom preset fields. |
 | `--presets JSON` | `presets.json` | Preset file to load. |
 | `--template`, `--category`, `--suffix` | `{name}_{suffix}`, `AMB`, `loop` | File naming. |
+| `--variations N` | `0` (off) | Write N = 3..5 rotated loop variations per input. |
+| `--min-spacing PCT` | `12` | Minimum distance between variation split points, % of file length. |
+| `--short-warning SECONDS` | `15` | Warn that variations may sound alike below this length. |
 | `--dry-run` | off | Validate and preview output names, write nothing. |
 | `--report-window MS` | `50` | Window used by the quality report. |
 
@@ -298,6 +301,57 @@ gives the familiar `<name>_loop.wav`.
 - A template without `{name}` or `{index}` gets a warning. Colliding names in a batch get
   `_2`, `_3` ... appended so nothing is overwritten.
 
+## Loop variations
+
+**Variations: N** (GUI) or `--variations N` (CLI, N = 3 to 5) writes N loops per input
+instead of one, named with `_v01`, `_v02` ... after the template
+(e.g. `AMB_Desert_Wind_01_loop_v02.wav`).
+
+```bash
+python -m loopmaker "Desert_Wind.wav" --variations 4 --template "AMB_{name}_{index}_loop"
+```
+
+**What a variation is.** Instead of splitting at the midpoint, each variation splits the
+source at a different point and applies the same swap + crossfade. Mathematically every
+variation is the **same loop rotated** (a test checks this with `np.roll`): the crossfade
+blends the same original end and start, and only the moment where the file begins and
+wraps moves. Each variation loops seamlessly on its own.
+
+**How split points are chosen** (`loopmaker/variations.py`):
+
+1. Short-window RMS (50 ms windows, 10 ms hop) of a mono fold, smoothed over 200 ms.
+2. The loudest transients are fenced off. Windows above the 95th percentile *and* 6 dB
+   over the median, plus 300 ms either side, are excluded, so a variation never starts in
+   the middle of a hit.
+3. Candidates must leave a crossfade's length on both sides, stay off the midpoint (that is
+   the standard loop), and be at least the **minimum spacing** apart: default **12 % of the
+   file length**, set with `--min-spacing PCT` or the GUI field.
+4. Valleys (local minima) of the smoothed energy are taken quietest first. If the spacing
+   rules leave too few, other allowed positions fill in, so a file that passes the length
+   check always gets its N variations.
+
+**Length rules:**
+
+- **Error** if the source is not longer than `2 × crossfade + N × minimum spacing`. The
+  message shows the numbers, e.g. *"too short for 5 variations: needs more than 2 x 2 s
+  crossfade + 5 x 1.2 s minimum spacing (12% of the file) = 10.0 s, but the file is 10.0 s"*.
+- **Warning** (still processed) below **15 s** (`--short-warning SECONDS` or the GUI field):
+  *"variations may sound nearly identical"*. This threshold is a rule of thumb.
+- In practice, variations are most useful for sources of **roughly 30 s or longer**. That is
+  also a rule of thumb, not a standard.
+
+### Using variations in a game engine (read this)
+
+Variations are the same material rotated, so **the end of one variation does NOT connect
+naturally to the start of another**. Only each file's own wrap (its end into its own start)
+is seamless. Playing `_v01` and then `_v03` back to back without a transition will jump.
+
+In Wwise, put the variations in a **Random Container set to continuous playback, with a
+crossfade transition between objects**, so each switch is covered by a crossfade. The
+exact option names and where they live in the Property Editor depend on your Wwise
+version: **check in Wwise** rather than relying on the wording here. The same idea applies
+in other engines: switch between variations only through a crossfade.
+
 ## Output files
 
 - Written to the output folder with the name from the template. **The input is never
@@ -350,6 +404,7 @@ loopmaker/
   convert.py    resampling and TPDF-dithered quantisation (pure DSP)
   presets.py    output presets, presets.json loading with built-in fallback
   naming.py     file naming templates: validation and rendering
+  variations.py split-point selection (RMS valleys, spacing, length checks)
   audio_io.py   soundfile read/write, subtype mapping, input collection
   pipeline.py   file-level + batch processing shared by CLI and GUI
   preview.py    waveform peaks + seamless looping playback (no UI code)

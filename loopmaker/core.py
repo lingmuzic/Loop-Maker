@@ -182,6 +182,7 @@ def make_loop(
     crossfade_s: float,
     curve: str = DEFAULT_CURVE,
     safety_fade_s: float = DEFAULT_SAFETY_FADE_S,
+    split_at: int | None = None,
 ) -> np.ndarray:
     """Turn ``audio`` into a seamlessly loopable signal.
 
@@ -202,6 +203,12 @@ def make_loop(
     safety_fade_s:
         Length of a tiny fade at the very start and end of the output, to
         avoid clicks. ``0`` disables it.
+    split_at:
+        Frame where A ends and B begins. ``None`` (default) splits at the
+        midpoint. Any other split gives a *rotation* of the same loop: the
+        crossfade blends the same original end/start, only the point where
+        the output file begins (and wraps) moves. Used for loop variations.
+        Both A and B must be at least as long as the crossfade.
 
     Returns
     -------
@@ -224,9 +231,18 @@ def make_loop(
     xfade = crossfade_length(audio.shape[0], sample_rate, crossfade_s)
     shape, _ = resolve_curve(audio, sample_rate, crossfade_s, curve)
 
-    mid = audio.shape[0] // 2  # A = audio[:mid], B = audio[mid:] (B gets the extra frame if odd)
-    first_half = audio[:mid]   # A
-    second_half = audio[mid:]  # B
+    n_frames = audio.shape[0]
+    # A = audio[:split], B = audio[split:]. At the midpoint B gets the extra
+    # frame when the length is odd.
+    split = n_frames // 2 if split_at is None else int(split_at)
+    if split_at is not None and not (xfade <= split <= n_frames - xfade):
+        raise ValueError(
+            f"Split point {split / sample_rate:.3f} s leaves less than the {xfade / sample_rate:.3f} s "
+            f"crossfade on one side; it must lie between {xfade / sample_rate:.3f} s and "
+            f"{(n_frames - xfade) / sample_rate:.3f} s."
+        )
+    first_half = audio[:split]   # A
+    second_half = audio[split:]  # B
 
     fade_out, fade_in = crossfade_gains(xfade, shape)
     if audio.ndim == 2:

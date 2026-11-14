@@ -21,6 +21,7 @@ from typing import Iterable, Iterator
 import numpy as np
 
 from . import audio_io, convert, core, loudness, quality
+from . import variations as variations_mod
 from .naming import Naming
 from .presets import OutputSpec
 
@@ -44,10 +45,19 @@ class LoopSettings:
     # Output format (preset) and file naming.
     output: OutputSpec = field(default_factory=OutputSpec)
     naming: Naming = field(default_factory=Naming)
+    # Loop variations: 0 = off (one standard loop), otherwise 3..5 rotations.
+    variations: int = 0
+    min_spacing: float = variations_mod.DEFAULT_MIN_SPACING
+    short_warning_s: float = variations_mod.DEFAULT_SHORT_WARNING_S
 
     def errors(self) -> list[str]:
         """Problems that block the whole batch (e.g. a bad template)."""
-        return self.output.errors() + self.naming.errors()
+        problems = self.output.errors() + self.naming.errors()
+        if self.variations not in (0, *variations_mod.VARIATION_COUNTS):
+            problems.append(f"variations must be off or one of {variations_mod.VARIATION_COUNTS}, not {self.variations}")
+        if not 0 < self.min_spacing < 1:
+            problems.append(f"minimum spacing must be between 0 and 100 %, not {self.min_spacing:.0%}")
+        return problems
 
 
 @dataclass
@@ -76,6 +86,10 @@ class ProcessResult:
     crossfade_start_s: float = 0.0
     crossfade_end_s: float = 0.0
     normalization: loudness.Normalization | None = None
+    # Variation number (1-based) and where its split point sits in the
+    # source, or None for the standard midpoint loop.
+    variation: int | None = None
+    split_s: float | None = None
     notes: list[str] = field(default_factory=list)
 
     def format(self) -> str:
@@ -92,6 +106,8 @@ class ProcessResult:
             f"  Crossfade: {self.crossfade_s:g} s, curve {self.curve} ({how}; end/start correlation "
             f"{self.correlation:+.2f}, threshold {core.AUTO_CURVE_THRESHOLD:.2f})",
         ]
+        if self.variation is not None:
+            lines.append(f"  Variation {self.variation:02d}: split at {self.split_s:.2f} s of the source")
         if self.normalization is not None:
             lines.append(self.normalization.format())
         lines.append(self.quality.format())
@@ -105,9 +121,11 @@ class FileResult:
 
     input_path: Path
     outputs: list[ProcessResult] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)  # file-level warnings
 
     def format(self) -> str:
-        return "\n".join(result.format() for result in self.outputs)
+        lines = [f"WARNING {self.input_path.name}: {note}" for note in self.notes]
+        return "\n".join(lines + [result.format() for result in self.outputs])
 
 
 def output_paths_for(
@@ -124,9 +142,10 @@ def output_paths_for(
     """
     extension = audio_io.EXTENSIONS[settings.output.file_format]
     out_dir = Path(settings.out_dir)
-    base = settings.naming.render(Path(input_path).stem, index, batch_size)
+    input_stem = Path(input_path).stem
+    numbers = range(1, settings.variations + 1) if settings.variations else [None]
     paths = []
-    for stem in [base]:
+    for stem in [settings.naming.render(input_stem, index, batch_size, variation=v) for v in numbers]:
         candidate, counter = out_dir / f"{stem}{extension}", 2
         while taken is not None and candidate.resolve() in taken:
             candidate, counter = out_dir / f"{stem}_{counter}{extension}", counter + 1
@@ -183,11 +202,28 @@ def process_file(
     )
 
     result = FileResult(input_path)
-    for output_path in output_paths:
+    frames = data.shape[0]
+    xfade_len = int(round(settings.crossfade_s * sample_rate))
+
+    # Standard loop: one output split at the midpoint. Variations: rotated
+    # split points at quiet spots (see variations.py).
+    if settings.variations:
+        splits: list[int | None] = variations_mod.choose_split_points(
+            data, sample_rate, settings.crossfade_s, settings.variations, settings.min_spacing
+        )
+        warning = variations_mod.short_source_warning(frames / sample_rate, settings.short_warning_s)
+        if warning:
+            result.notes.append(warning)
+    else:
+        splits = [None]
+    if len(splits) != len(output_paths):
+        raise ValueError(f"expected {len(splits)} output paths, got {len(output_paths)}")
+
+    for number, (split, output_path) in enumerate(zip(splits, output_paths), start=1):
         notes = [subtype_note] if subtype_note else []
         looped = core.make_loop(
             data, sample_rate, crossfade_s=settings.crossfade_s, curve=curve,
-            safety_fade_s=settings.safety_fade_ms / 1000.0,
+            safety_fade_s=settings.safety_fade_ms / 1000.0, split_at=split,
         )
 
         # Compare against the original at the *same* gain, i.e. before
@@ -209,9 +245,7 @@ def process_file(
         )
 
         # The output is B | A; the crossfade ends where B's full length ends.
-        frames = data.shape[0]
-        second_half_len = frames - frames // 2
-        xfade_len = int(round(settings.crossfade_s * sample_rate))
+        second_half_len = frames - (frames // 2 if split is None else split)
         result.outputs.append(
             ProcessResult(
                 input_path=input_path,
@@ -232,6 +266,8 @@ def process_file(
                 crossfade_start_s=(second_half_len - xfade_len) / sample_rate,
                 crossfade_end_s=second_half_len / sample_rate,
                 normalization=normalization,
+                variation=None if split is None else number,
+                split_s=None if split is None else split / sample_rate,
                 notes=notes,
             )
         )

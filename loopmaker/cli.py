@@ -13,7 +13,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import APP_NAME, __version__, audio_io, core, loudness, naming, pipeline, presets, quality
+from . import APP_NAME, __version__, audio_io, core, loudness, naming, pipeline, presets, quality, variations
 
 # Options that only make sense with --preset Custom.
 _CUSTOM_OPTIONS = ("sample_rate", "bit_depth", "file_format", "dither")
@@ -44,6 +44,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--safety-fade", type=float, default=core.DEFAULT_SAFETY_FADE_S * 1000, metavar="MS",
         help="tiny fade at the very start/end of the output in ms, 0 to disable (default: %(default)g)",
     )
+
+    var = parser.add_argument_group("variations")
+    var.add_argument("--variations", type=int, choices=(0, *variations.VARIATION_COUNTS), default=0, metavar="N",
+                     help="write N rotated loop variations (3-5) instead of one loop; 0 = off (default)")
+    var.add_argument("--min-spacing", type=float, default=variations.DEFAULT_MIN_SPACING * 100, metavar="PCT",
+                     help="minimum distance between variation split points, %% of file length (default: %(default)g)")
+    var.add_argument("--short-warning", type=float, default=variations.DEFAULT_SHORT_WARNING_S, metavar="SECONDS",
+                     help="warn that variations may sound alike below this source length (default: %(default)g)")
 
     level = parser.add_argument_group("loudness")
     level.add_argument(
@@ -133,6 +141,9 @@ def main(argv: list[str] | None = None) -> int:
         peak_ceiling_dbtp=args.peak_ceiling,
         output=spec,
         naming=naming.Naming(args.template, args.category, args.suffix),
+        variations=args.variations,
+        min_spacing=args.min_spacing / 100.0,
+        short_warning_s=args.short_warning,
     )
     problems = settings.errors()
     if problems:
