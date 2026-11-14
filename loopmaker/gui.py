@@ -26,7 +26,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from . import APP_NAME, audio_io, core, pipeline, preview
+from . import APP_NAME, audio_io, core, loudness, pipeline, preview
 
 try:  # Optional dependency: drag-and-drop support.
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -71,6 +71,9 @@ class LoopMakerApp:
         self.curve_var = tk.StringVar(value=core.DEFAULT_CURVE)
         self.safety_var = tk.StringVar(value=f"{core.DEFAULT_SAFETY_FADE_S * 1000:g}")
         self.out_var = tk.StringVar(value=str(pipeline.DEFAULT_OUT_DIR.resolve()))
+        self.normalize_var = tk.BooleanVar(value=False)
+        self.target_lufs_var = tk.StringVar(value=f"{loudness.DEFAULT_TARGET_LUFS:g}")
+        self.ceiling_var = tk.StringVar(value=f"{loudness.DEFAULT_PEAK_CEILING_DBTP:g}")
         self.status_var = tk.StringVar(value="Process some files, then pick an output to audition it.")
 
         self._build_layout()
@@ -139,9 +142,18 @@ class LoopMakerApp:
         ttk.Label(frame, text="Safety fade (ms)").grid(row=2, column=0, sticky="w", **pad)
         ttk.Entry(frame, textvariable=self.safety_var, width=10).grid(row=2, column=1, sticky="w", **pad)
 
-        ttk.Label(frame, text="Output folder").grid(row=3, column=0, sticky="w", **pad)
-        ttk.Entry(frame, textvariable=self.out_var).grid(row=3, column=1, sticky="ew", **pad)
-        ttk.Button(frame, text="Browse...", command=self._choose_output).grid(row=3, column=2, **pad)
+        # Loudness normalisation: checkbox + target + true-peak ceiling on one row.
+        norm_row = ttk.Frame(frame)
+        norm_row.grid(row=3, column=0, columnspan=3, sticky="w")
+        ttk.Checkbutton(norm_row, text="Normalize loudness to", variable=self.normalize_var).pack(side=tk.LEFT, **pad)
+        ttk.Entry(norm_row, textvariable=self.target_lufs_var, width=7).pack(side=tk.LEFT)
+        ttk.Label(norm_row, text="LUFS     true-peak ceiling").pack(side=tk.LEFT, **pad)
+        ttk.Entry(norm_row, textvariable=self.ceiling_var, width=7).pack(side=tk.LEFT)
+        ttk.Label(norm_row, text="dBTP").pack(side=tk.LEFT, **pad)
+
+        ttk.Label(frame, text="Output folder").grid(row=4, column=0, sticky="w", **pad)
+        ttk.Entry(frame, textvariable=self.out_var).grid(row=4, column=1, sticky="ew", **pad)
+        ttk.Button(frame, text="Browse...", command=self._choose_output).grid(row=4, column=2, **pad)
 
     def _build_test_area(self, row: int, pad: dict) -> None:
         frame = ttk.LabelFrame(self.root, text="Test playback")
@@ -250,8 +262,10 @@ class LoopMakerApp:
         try:
             crossfade = float(self.crossfade_var.get())
             safety = float(self.safety_var.get())
+            target = float(self.target_lufs_var.get())
+            ceiling = float(self.ceiling_var.get())
         except ValueError:
-            messagebox.showerror(APP_NAME, "Crossfade and safety fade must be numbers.")
+            messagebox.showerror(APP_NAME, "Crossfade, safety fade, LUFS and dBTP fields must be numbers.")
             return None
         if crossfade <= 0 or safety < 0:
             messagebox.showerror(APP_NAME, "Crossfade must be > 0 and safety fade must be >= 0.")
@@ -261,6 +275,8 @@ class LoopMakerApp:
             curve=self.curve_var.get(),
             safety_fade_ms=safety,
             out_dir=Path(self.out_var.get()),
+            normalize_lufs=target if self.normalize_var.get() else None,
+            peak_ceiling_dbtp=ceiling,
         )
 
     def _start_processing(self) -> None:
@@ -320,9 +336,10 @@ class LoopMakerApp:
     def _add_output(self, result: pipeline.ProcessResult) -> None:
         self.results.append(result)
         verdict = "SMOOTH" if result.quality.after.is_smooth else "CHECK BY EAR"
-        self.output_list.insert(
-            tk.END, f"{result.output_path.name}    {result.output_seconds:.2f} s    {verdict}"
-        )
+        parts = [result.output_path.name, f"{result.output_seconds:.2f} s", verdict, result.curve]
+        if result.normalization is not None:
+            parts.append(f"{result.normalization.final_lufs:.1f} LUFS")
+        self.output_list.insert(tk.END, "    ".join(parts))
 
     def _clear_outputs(self) -> None:
         self.player.close()

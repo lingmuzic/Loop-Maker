@@ -84,10 +84,12 @@ def test_batch_avoids_output_name_collisions(tmp_path):
 
 def test_clipping_is_reported_for_integer_output(tmp_path):
     # A full-scale DC signal: the equal-power crossfade of two identical
-    # signals peaks at +3 dB, which a PCM file cannot hold.
+    # signals peaks at +3 dB, which a PCM file cannot hold. (Forced curve:
+    # "auto" would correctly pick linear here and avoid the overshoot.)
     src = tmp_path / "dc.wav"
     sf.write(str(src), np.full(SR * 2, 0.99), SR, subtype="PCM_16")
-    result = pipeline.process_file(src, pipeline.LoopSettings(crossfade_s=0.5, out_dir=tmp_path / "out"))
+    settings = pipeline.LoopSettings(crossfade_s=0.5, curve="equal_power", out_dir=tmp_path / "out")
+    result = pipeline.process_file(src, settings)
     assert any("clipped" in note for note in result.notes)
     written, _ = sf.read(str(result.output_path))
     assert np.max(np.abs(written)) <= 1.0

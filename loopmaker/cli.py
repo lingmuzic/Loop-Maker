@@ -12,7 +12,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import APP_NAME, __version__, audio_io, core, pipeline, quality
+from . import APP_NAME, __version__, audio_io, core, loudness, pipeline, quality
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,7 +30,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--curve", choices=core.CURVES, default=core.DEFAULT_CURVE,
-        help="crossfade curve; equal_power suits uncorrelated ambience (default: %(default)s)",
+        help="crossfade curve; 'auto' measures how correlated the file's end and start are and "
+             "picks linear (correlated/tonal) or equal_power (uncorrelated, e.g. wind, rain) "
+             "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "--normalize", type=float, default=None, metavar="LUFS",
+        help="bring every output to this integrated loudness, e.g. -23 (default: off)",
+    )
+    parser.add_argument(
+        "--peak-ceiling", type=float, default=loudness.DEFAULT_PEAK_CEILING_DBTP, metavar="DBTP",
+        help="true-peak ceiling used by --normalize; gain is reduced rather than clipping (default: %(default)g)",
     )
     parser.add_argument(
         "--safety-fade", type=float, default=core.DEFAULT_SAFETY_FADE_S * 1000, metavar="MS",
@@ -65,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
         safety_fade_ms=args.safety_fade,
         out_dir=args.out,
         report_window_ms=args.report_window,
+        normalize_lufs=args.normalize,
+        peak_ceiling_dbtp=args.peak_ceiling,
     )
 
     failures = 0

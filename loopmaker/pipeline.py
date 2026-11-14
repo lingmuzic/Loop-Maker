@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator
 
-from . import audio_io, core, quality
+from . import audio_io, core, loudness, quality
 
 OUTPUT_SUFFIX = "_loop"
 DEFAULT_OUT_DIR = Path("output")
@@ -26,6 +26,10 @@ class LoopSettings:
     safety_fade_ms: float = core.DEFAULT_SAFETY_FADE_S * 1000
     out_dir: Path = DEFAULT_OUT_DIR
     report_window_ms: float = quality.DEFAULT_WINDOW_MS
+    # Loudness normalisation: None = off, otherwise the target in LUFS that
+    # every file of the batch is brought to.
+    normalize_lufs: float | None = None
+    peak_ceiling_dbtp: float = loudness.DEFAULT_PEAK_CEILING_DBTP
 
 
 @dataclass
@@ -41,19 +45,30 @@ class ProcessResult:
     input_seconds: float
     output_seconds: float
     quality: quality.LoopQuality
+    # Fade shape actually applied ("equal_power"/"linear"), whether it was
+    # picked automatically, and the measured correlation behind the choice.
+    curve: str = "equal_power"
+    curve_was_auto: bool = False
+    correlation: float = 0.0
     # Where the crossfade sits inside the output file, in seconds. Used by the
     # GUI to highlight the only edited region of the loop.
     crossfade_start_s: float = 0.0
     crossfade_end_s: float = 0.0
+    normalization: loudness.Normalization | None = None
     notes: list[str] = field(default_factory=list)
 
     def format(self) -> str:
+        how = "auto" if self.curve_was_auto else "manual"
         lines = [
             f"{self.input_path.name} -> {self.output_path}",
             f"  {self.sample_rate} Hz, {self.channels} ch, {self.input_subtype} -> {self.output_subtype}, "
             f"{self.input_seconds:.3f} s -> {self.output_seconds:.3f} s",
-            self.quality.format(),
+            f"  Crossfade curve: {self.curve} ({how}; end/start correlation {self.correlation:+.2f}, "
+            f"threshold {core.AUTO_CURVE_THRESHOLD:.2f})",
         ]
+        if self.normalization is not None:
+            lines.append(self.normalization.format())
+        lines.append(self.quality.format())
         lines += [f"  NOTE: {note}" for note in self.notes]
         return "\n".join(lines)
 
@@ -87,23 +102,41 @@ def process_file(input_path: Path, settings: LoopSettings, output_path: Path | N
         raise ValueError(f"Refusing to overwrite the input file: {input_path}")
 
     audio = audio_io.read_audio(input_path)
+
+    # Resolve "auto" here (rather than inside make_loop) so the choice and the
+    # correlation behind it can be reported.
+    curve, correlation = core.resolve_curve(audio.data, audio.sample_rate, settings.crossfade_s, settings.curve)
     looped = core.make_loop(
         audio.data,
         audio.sample_rate,
         crossfade_s=settings.crossfade_s,
-        curve=settings.curve,
+        curve=curve,
         safety_fade_s=settings.safety_fade_ms / 1000.0,
     )
 
     notes: list[str] = []
+
+    # The loop-point report compares against the original at the *same* gain,
+    # so it is measured before normalisation (gain doesn't change smoothness).
+    report = quality.compare(audio.data, looped, audio.sample_rate, settings.report_window_ms)
+
+    # Loudness normalisation is measured on the finished loop, because that is
+    # exactly what will play in the game.
+    normalization = None
+    if settings.normalize_lufs is not None:
+        try:
+            looped, normalization = loudness.normalize(
+                looped, audio.sample_rate, settings.normalize_lufs, settings.peak_ceiling_dbtp
+            )
+        except loudness.LoudnessError as exc:
+            notes.append(f"not loudness-normalised: {exc}")
+
     out_subtype, subtype_note = audio_io.wav_subtype_for(audio.subtype)
     if subtype_note:
         notes.append(subtype_note)
     clip_warning = audio_io.write_wav(output_path, looped, audio.sample_rate, out_subtype)
     if clip_warning:
         notes.append(clip_warning)
-
-    report = quality.compare(audio.data, looped, audio.sample_rate, settings.report_window_ms)
 
     # The output is B | A with the crossfade ending where B's full length ends
     # (see core.make_loop): B has frames - frames // 2 samples.
@@ -123,6 +156,10 @@ def process_file(input_path: Path, settings: LoopSettings, output_path: Path | N
         input_seconds=audio.data.shape[0] / audio.sample_rate,
         output_seconds=looped.shape[0] / audio.sample_rate,
         quality=report,
+        curve=curve,
+        curve_was_auto=settings.curve == "auto",
+        correlation=correlation,
+        normalization=normalization,
         notes=notes,
     )
 

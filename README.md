@@ -39,20 +39,62 @@ crossfade:  [ B ....  \/\/\/  .... A ]            (overlap B's tail with A's hea
 
 | Curve | Gains | Use for |
 |---|---|---|
-| `equal_power` (default) | sin / cos, `out² + in² = 1` | Uncorrelated material: ambience, room tone, wind, rain. Keeps perceived loudness constant. |
+| `auto` (default) | picks one of the two below per file | Any material; see below. |
+| `equal_power` | sin / cos, `out² + in² = 1` | Uncorrelated material: ambience, room tone, wind, rain. Keeps perceived loudness constant. |
 | `linear` | straight ramps, `out + in = 1` | Correlated material (e.g. steady tones/hums), where equal power would bump the level by up to +3 dB. |
+
+#### How `auto` decides
+
+Using the wrong curve makes the middle of the crossfade audibly **dip** (linear on
+noise, about −3 dB) or **bulge** (equal power on a steady tone, about +3 dB). `auto`
+measures the **zero-lag correlation *r*** between the two signals that will actually be
+crossfaded: the file's end and the file's start, sample-aligned exactly as they will
+overlap. The measurement is Hann-weighted toward the centre of the crossfade, where both
+gains are large, and pooled across channels so every channel gets the same curve.
+
+At the centre of the crossfade the summed power relative to the input is `1 + r` for
+equal power and `(1 + r) / 2` for linear. The two errors are equal in dB when
+`(1 + r)² = 2`, so the threshold is **r = √2 − 1 ≈ 0.41**: above it `linear`, below it
+`equal_power`.
+
+It measures correlation rather than asking "is this tonal?" on purpose: two hums that
+meet 90° out of phase are tonal but add like noise, so equal power is the right call
+for them, and the measurement gets that right. The chosen curve and *r* appear in every
+report.
+
+### Loudness normalization (batch)
+
+With `--normalize -24` (or the GUI checkbox), every output in the batch is brought to the
+same **integrated loudness** (ITU-R BS.1770-4 / EBU R128, via
+[pyloudnorm](https://github.com/csteinmetz1/pyloudnorm)), so a set of ambience beds
+arrives in Wwise/FMOD/engine already level-matched.
+
+- Measured on the **finished loop**, the exact audio that will play in the game.
+- One static gain per file. No limiter or compressor touches the sound.
+- **True-peak ceiling** (default −1 dBTP, estimated with 4x oversampling): if reaching the
+  target would exceed it, the gain stops at the ceiling and the report says how many dB
+  the file fell short. To keep such a file consistent with the rest, lower the batch
+  target.
+- 5.1 files are measured without the LFE channel, as BS.1770 specifies. Layouts with more
+  than 6 channels, silent files, and files shorter than 400 ms are written un-normalised
+  with a note.
+- Off by default. The −23 LUFS default target in the GUI is the EBU R128 reference.
+  Pick whatever your project's asset loudness spec says.
 
 ### Loop quality report
 
 After each file, Loop Maker prints a small report comparing the **original** (as if
-it were looped untouched) with the **output**:
+it were looped untouched) with the **output**. Both are measured before loudness
+normalisation, so their levels are directly comparable:
 
 ```
-wind.wav -> output\wind_loop.wav
-  48000 Hz, 2 ch, PCM_24 -> PCM_24, 8.000 s -> 5.000 s
+wind_quiet.wav -> output\wind_quiet_loop.wav
+  48000 Hz, 2 ch, PCM_24 -> PCM_24, 12.000 s -> 10.000 s
+  Crossfade curve: equal_power (auto; end/start correlation +0.02, threshold 0.41)
+  Loudness: -31.8 -> -24.0 LUFS (gain +7.8 dB, true peak -10.4 dBTP)
   Loop-point check (window 50 ms): SMOOTH
-  original  jump 0.18884 ( 0.47x typical step)   RMS head/tail  -31.9 /  -16.6 dBFS (diff -15.31 dB)
-  loop      jump 0.00000 ( 0.00x typical step)   RMS head/tail  -21.4 /  -21.5 dBFS (diff +0.14 dB)
+  original  jump 0.03541 (40.19x typical step)   RMS head/tail  -32.5 /  -32.3 dBFS (diff -0.23 dB)
+  loop      jump 0.00000 ( 0.00x typical step)   RMS head/tail  -32.6 /  -31.3 dBFS (diff -1.38 dB)
 ```
 
 - **jump**: `|first sample - last sample|` (max over channels), and that value divided by
@@ -98,7 +140,9 @@ python -m loopmaker "D:\Recordings\Ambience"
 |---|---|---|
 | `inputs` | (required) | Files and/or folders. Folders are scanned non-recursively for `.wav .flac .aif .aiff .ogg`. |
 | `--crossfade SECONDS` | `2.0` | Crossfade length. Must be > 0 and ≤ half the file length. |
-| `--curve` | `equal_power` | `equal_power` or `linear`. |
+| `--curve` | `auto` | `auto`, `equal_power` or `linear`. |
+| `--normalize LUFS` | off | Bring every output to this integrated loudness, e.g. `-24`. |
+| `--peak-ceiling DBTP` | `-1` | True-peak ceiling for `--normalize`. |
 | `--safety-fade MS` | `5` | Start/end fade in milliseconds; `0` disables it. |
 | `--out FOLDER` | `output` | Output folder (created if needed). |
 | `--report-window MS` | `50` | Window used by the quality report. |
@@ -192,6 +236,7 @@ number. The tests check continuity with the fade disabled.
 loopmaker/
   core.py       pure numpy DSP: make_loop(), crossfade curves, safety fades
   quality.py    loop-point measurements and report formatting
+  loudness.py   BS.1770 loudness, true peak, normalisation gain
   audio_io.py   soundfile read/write, bit-depth mapping, input collection
   pipeline.py   file-level + batch processing shared by CLI and GUI
   preview.py    waveform peaks + seamless looping playback (no UI code)
