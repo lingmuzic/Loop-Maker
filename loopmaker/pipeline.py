@@ -41,6 +41,10 @@ class ProcessResult:
     input_seconds: float
     output_seconds: float
     quality: quality.LoopQuality
+    # Where the crossfade sits inside the output file, in seconds. Used by the
+    # GUI to highlight the only edited region of the loop.
+    crossfade_start_s: float = 0.0
+    crossfade_end_s: float = 0.0
     notes: list[str] = field(default_factory=list)
 
     def format(self) -> str:
@@ -101,7 +105,15 @@ def process_file(input_path: Path, settings: LoopSettings, output_path: Path | N
 
     report = quality.compare(audio.data, looped, audio.sample_rate, settings.report_window_ms)
 
+    # The output is B | A with the crossfade ending where B's full length ends
+    # (see core.make_loop): B has frames - frames // 2 samples.
+    sr = audio.sample_rate
+    second_half_len = audio.data.shape[0] - audio.data.shape[0] // 2
+    xfade_len = int(round(settings.crossfade_s * sr))
+
     return ProcessResult(
+        crossfade_start_s=(second_half_len - xfade_len) / sr,
+        crossfade_end_s=second_half_len / sr,
         input_path=input_path,
         output_path=output_path,
         sample_rate=audio.sample_rate,

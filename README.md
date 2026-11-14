@@ -79,8 +79,8 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-`tkinterdnd2` is optional; without it the GUI falls back to the *Add files* / *Add
-folder* buttons. `matplotlib` and `pytest` are only needed for the figure and tests.
+`tkinterdnd2` and `sounddevice` are optional; without them the GUI falls back to the
+*Add files* / *Add folder* buttons and a waveform-only test area. `matplotlib` and `pytest` are only needed for the figure and tests.
 
 ## Usage
 
@@ -107,13 +107,33 @@ Exit code is `0` when every file succeeded, `1` if any file failed or was skippe
 
 ### GUI
 
+On Windows, double-click **`Loop Maker.bat`** in the project folder (it starts the GUI
+from the project's `.venv` without a console window). Or from a terminal:
+
 ```bash
-python -m loopmaker.gui
+.venv\Scripts\python.exe -m loopmaker.gui
 ```
 
 Drag files or folders onto the list (or use the buttons), set the crossfade, curve,
 safety fade and output folder, then press **Process**. The log shows the same quality
 report as the CLI. The GUI calls exactly the same `pipeline.process_batch()` as the CLI.
+
+**Test playback.** After processing, every output appears in the *Test playback* list
+with its verdict. Select one to see its waveform; the crossfade region is highlighted
+in orange.
+
+| Action | Effect |
+|---|---|
+| **Space** or **Play/Stop** | Start/stop looping playback (resumes where it stopped) |
+| **Left-click the waveform** | Play from that point (jumps there if already playing) |
+| **Play loop point** | Start 2 s before the end, so you hear the wrap straight away |
+| **Open output folder** | Show the files in Explorer |
+
+Playback wraps from the last sample straight into the first, exactly like a game
+engine's looping voice, so what you hear is a true test of the loop point. Mono files
+play on both speakers; files with more channels than the output device are folded to
+mono for auditioning only (the written file is untouched). Playback needs the optional
+`sounddevice` package; without it the waveform still works.
 
 ### As a library
 
@@ -174,6 +194,7 @@ loopmaker/
   quality.py    loop-point measurements and report formatting
   audio_io.py   soundfile read/write, bit-depth mapping, input collection
   pipeline.py   file-level + batch processing shared by CLI and GUI
+  preview.py    waveform peaks + seamless looping playback (no UI code)
   cli.py        argparse front-end   (python -m loopmaker)
   gui.py        Tkinter front-end    (python -m loopmaker.gui)
 tests/          pytest suite using synthetic noise and sine signals

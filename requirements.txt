@@ -3,3 +3,4 @@ soundfile>=0.12
 matplotlib>=3.7      # only needed to regenerate the README figure
 pytest>=7.0          # only needed to run the tests
 tkinterdnd2>=0.3     # optional: drag-and-drop in the GUI
+sounddevice>=0.4     # optional: loop playback in the GUI's test area
