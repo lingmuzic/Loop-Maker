@@ -12,14 +12,14 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__, audio_io, core, pipeline, quality
+from . import APP_NAME, __version__, audio_io, core, pipeline, quality
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loopmaker",
         description=(
-            "Make ambience recordings seamlessly loopable: split in half, swap the halves "
+            f"{APP_NAME}: make ambience recordings seamlessly loopable: split in half, swap the halves "
             "and crossfade across the middle join."
         ),
     )
@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--report-window", type=float, default=quality.DEFAULT_WINDOW_MS, metavar="MS",
         help="window used by the loop-quality report in ms (default: %(default)g)",
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     return parser
 
 

@@ -1,4 +1,4 @@
-# LoopMaker
+# Loop Maker
 
 Turn ambience recordings into **seamlessly loopable** audio files, the same way a
 sound designer does it by hand in a DAW, but in batch, with a quality check.
@@ -7,7 +7,7 @@ sound designer does it by hand in a DAW, but in batch, with a quality check.
 
 *Synthetic example (filtered noise with a level drift; see
 [`scripts/make_readme_figure.py`](scripts/make_readme_figure.py)). Top: the original
-file. Middle: the LoopMaker output. Bottom: what you hear at the loop point when
+file. Middle: the Loop Maker output. Bottom: what you hear at the loop point when
 each file wraps around from its end back to its start.*
 
 ## Why
@@ -15,7 +15,7 @@ each file wraps around from its end back to its start.*
 Game audio engines loop ambience beds constantly. If a recording is looped as-is, its
 end and start rarely match, which causes a click (a sample jump) and often an audible
 change in level or texture every time the loop wraps. The classic manual fix is the
-"swap halves and crossfade" edit. LoopMaker automates it.
+"swap halves and crossfade" edit. Loop Maker automates it.
 
 ## How it works
 
@@ -44,7 +44,7 @@ crossfade:  [ B ....  \/\/\/  .... A ]            (overlap B's tail with A's hea
 
 ### Loop quality report
 
-After each file, LoopMaker prints a small report comparing the **original** (as if
+After each file, Loop Maker prints a small report comparing the **original** (as if
 it were looped untouched) with the **output**:
 
 ```

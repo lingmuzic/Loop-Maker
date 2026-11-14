@@ -102,7 +102,7 @@ def main() -> None:
     # --- 3. Wrap point zooms ----------------------------------------------
     for col, (sig, title) in enumerate(
         [(original, "Loop point of the original: click + level jump"),
-         (looped, "Loop point after LoopMaker: continuous")]
+         (looped, "Loop point after Loop Maker: continuous")]
     ):
         ax = fig.add_subplot(grid[2, col])
         style(ax, title)

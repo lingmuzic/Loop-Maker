@@ -20,7 +20,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from . import audio_io, core, pipeline
+from . import APP_NAME, audio_io, core, pipeline
 
 try:  # Optional dependency: drag-and-drop support.
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -42,7 +42,7 @@ class LoopMakerApp:
         self.log_queue: queue.Queue[object] = queue.Queue()  # str lines + a finish sentinel
         self.worker: threading.Thread | None = None
 
-        root.title("LoopMaker")
+        root.title(APP_NAME)
         root.minsize(640, 520)
 
         # Tk variables bound to the settings widgets.
@@ -179,10 +179,10 @@ class LoopMakerApp:
             crossfade = float(self.crossfade_var.get())
             safety = float(self.safety_var.get())
         except ValueError:
-            messagebox.showerror("LoopMaker", "Crossfade and safety fade must be numbers.")
+            messagebox.showerror(APP_NAME,"Crossfade and safety fade must be numbers.")
             return None
         if crossfade <= 0 or safety < 0:
-            messagebox.showerror("LoopMaker", "Crossfade must be > 0 and safety fade must be >= 0.")
+            messagebox.showerror(APP_NAME,"Crossfade must be > 0 and safety fade must be >= 0.")
             return None
         return pipeline.LoopSettings(
             crossfade_s=crossfade,
@@ -195,7 +195,7 @@ class LoopMakerApp:
         if self.worker and self.worker.is_alive():
             return
         if not self.files:
-            messagebox.showinfo("LoopMaker", "Add some audio files first.")
+            messagebox.showinfo(APP_NAME, "Add some audio files first.")
             return
         settings = self._read_settings()
         if settings is None:

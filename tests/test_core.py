@@ -54,7 +54,7 @@ def test_new_head_and_tail_are_the_original_midpoint_neighbours():
 
 def test_no_discontinuity_at_wrap_point_sine():
     # A sine whose period does NOT divide the file length: looping the raw
-    # file produces a big jump, the LoopMaker output must not.
+    # file produces a big jump, the Loop Maker output must not.
     x = sine(3.0, freq=217.3)
     raw_jump = abs(x[0] - x[-1])
     y = core.make_loop(x, SR, 0.5, curve="linear", safety_fade_s=0)
