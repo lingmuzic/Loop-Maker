@@ -44,6 +44,7 @@ WAVE_FG = "#2a78d6"
 WAVE_XFADE = "#fbe1d6"
 WAVE_MIDLINE = "#d6d5d0"
 PLAYHEAD = "#d03b3b"
+PEAK_LIMITED_FG = "#b4580f"  # dark orange text for outputs that missed the LUFS target
 
 PLAYHEAD_REFRESH_MS = 30
 LOOP_POINT_PREROLL_S = 2.0  # "Play loop point" starts this long before the wrap
@@ -337,9 +338,15 @@ class LoopMakerApp:
         self.results.append(result)
         verdict = "SMOOTH" if result.quality.after.is_smooth else "CHECK BY EAR"
         parts = [result.output_path.name, f"{result.output_seconds:.2f} s", verdict, result.curve]
-        if result.normalization is not None:
-            parts.append(f"{result.normalization.final_lufs:.1f} LUFS")
+        norm = result.normalization
+        if norm is not None:
+            parts.append(f"{norm.final_lufs:.1f} LUFS")
+            if norm.limited_by_peak:
+                # Make it obvious without digging through the log.
+                parts.append(f"PEAK-LIMITED ({norm.shortfall_db:.1f} dB short of {norm.target_lufs:g})")
         self.output_list.insert(tk.END, "    ".join(parts))
+        if norm is not None and norm.limited_by_peak:
+            self.output_list.itemconfigure(tk.END, foreground=PEAK_LIMITED_FG)
 
     def _clear_outputs(self) -> None:
         self.player.close()

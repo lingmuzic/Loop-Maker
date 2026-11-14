@@ -41,6 +41,7 @@ def test_normalize_reaches_target():
     assert info.final_lufs == pytest.approx(-23.0, abs=0.01)
     assert loudness.integrated_loudness(out, SR) == pytest.approx(-23.0, abs=0.05)
     assert not info.limited_by_peak
+    assert info.shortfall_db == 0.0
 
 
 def test_peak_ceiling_wins_over_target():
@@ -48,6 +49,8 @@ def test_peak_ceiling_wins_over_target():
     # peak, which is above the -1 dBTP ceiling, so the gain must stop at +19 dB.
     out, info = loudness.normalize(sine(peak_db=-20), SR, target_lufs=-3, peak_ceiling_dbtp=-1)
     assert info.limited_by_peak
+    # Gain stops at +19 dB, so the shortfall is target - (measured + 19).
+    assert info.shortfall_db == pytest.approx(-3 - (info.measured_lufs + 19.0), abs=0.01)
     assert info.true_peak_after_dbtp == pytest.approx(-1.0, abs=0.01)
     assert loudness.true_peak_db(out) <= -1.0 + 0.05
     assert "short of target" in info.format()

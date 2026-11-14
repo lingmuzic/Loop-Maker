@@ -105,13 +105,18 @@ class Normalization:
     def final_lufs(self) -> float:
         return self.measured_lufs + self.gain_db
 
+    @property
+    def shortfall_db(self) -> float:
+        """How far below the target the file ended up (0 when the target was reached)."""
+        return max(0.0, self.target_lufs - self.final_lufs) if self.limited_by_peak else 0.0
+
     def format(self) -> str:
         line = (
             f"  Loudness: {self.measured_lufs:.1f} -> {self.final_lufs:.1f} LUFS "
             f"(gain {self.gain_db:+.1f} dB, true peak {self.true_peak_after_dbtp:.1f} dBTP)"
         )
         if self.limited_by_peak:
-            line += f"\n  NOTE: {self.target_lufs - self.final_lufs:.1f} dB short of target, held back by the peak ceiling"
+            line += f"\n  NOTE: {self.shortfall_db:.1f} dB short of target, held back by the peak ceiling"
         return line
 
 
