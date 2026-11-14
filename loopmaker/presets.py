@@ -27,6 +27,8 @@ from pathlib import Path
 
 import soundfile as sf
 
+from .paths import app_dir
+
 CUSTOM = "Custom"
 SOURCE = "source"
 
@@ -34,8 +36,9 @@ SAMPLE_RATES = (44100, 48000, 96000)
 BIT_DEPTHS = ("16", "24", "32f")
 DITHER_MODES = ("auto", "always", "never")
 
-#: Default location of the user-editable preset file (project root).
-DEFAULT_PRESETS_PATH = Path(__file__).resolve().parents[1] / "presets.json"
+#: Default location of the user-editable preset file: the project root, or the
+#: folder next to ``Loop Maker.exe`` in the standalone build.
+DEFAULT_PRESETS_PATH = app_dir() / "presets.json"
 
 
 def available_formats() -> tuple[str, ...]:

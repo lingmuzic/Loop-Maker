@@ -1,0 +1,4 @@
+# Extra tools for building the standalone Windows app (scripts/build_exe.py).
+-r requirements.txt
+pyinstaller>=6.0
+pillow>=10.0         # only to regenerate assets/loop_maker.ico (scripts/make_icon.py)

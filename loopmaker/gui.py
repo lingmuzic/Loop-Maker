@@ -31,6 +31,9 @@ from tkinter.scrolledtext import ScrolledText
 from . import APP_NAME, audio_io, batch, core, loudness, naming, pipeline, presets, variations
 from .gui_playback import PlaybackPanel
 from .gui_table import STATUS_COLOURS, FileTable
+from .paths import app_dir, resource_path
+
+ICON_FILE = "assets/loop_maker.ico"
 
 try:  # Optional dependency: drag-and-drop support.
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -59,6 +62,12 @@ class LoopMakerApp:
 
         root.title(APP_NAME)
         root.minsize(960, 820)
+        icon = resource_path(ICON_FILE)
+        if icon.is_file():
+            try:
+                root.iconbitmap(default=str(icon))
+            except tk.TclError:
+                pass  # cosmetic only
 
         self.presets, preset_warnings = presets.load_presets()
         self._create_variables()
@@ -93,7 +102,9 @@ class LoopMakerApp:
         self.template_var = sv(value=naming.DEFAULT_TEMPLATE)
         self.category_var = sv(value=naming.DEFAULT_CATEGORY)
         self.suffix_var = sv(value=naming.DEFAULT_SUFFIX)
-        self.out_var = sv(value=str(pipeline.DEFAULT_OUT_DIR.resolve()))
+        # Default output: next to the project / next to Loop Maker.exe, so it
+        # does not depend on the working directory a shortcut happens to use.
+        self.out_var = sv(value=str(app_dir() / pipeline.DEFAULT_OUT_DIR))
         self.max_xfade_var = sv()
         self.template_hint_var = sv()
         self.summary_var = sv()
