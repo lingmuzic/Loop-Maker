@@ -143,7 +143,7 @@ class FileTable(ttk.Frame):
 
         self.headers = []
         for col, key in enumerate(COLUMN_KEYS):
-            header = tk.Label(self.inner, background="#ecebe7", anchor="w", padx=4, font=("Segoe UI", 9, "bold"))
+            header = tk.Label(self.inner, background="#ecebe7", anchor="w", padx=4, font=self.tr.font(9))
             header.grid(row=0, column=col, sticky="ew")
             self.headers.append((header, key))
         self.inner.columnconfigure(1, weight=2)  # file name
@@ -158,7 +158,7 @@ class FileTable(ttk.Frame):
     def retranslate(self) -> None:
         """Re-render every translated text (after a language change)."""
         for header, key in self.headers:
-            header.configure(text=self.tr.t(key) if key else "")
+            header.configure(text=self.tr.t(key) if key else "", font=self.tr.font(9))
         self.empty_hint.configure(text=self.tr.t("table_empty" if self.dnd_available else "table_empty_no_dnd"))
         for row in self.rows:
             self._render_format(row)
@@ -193,7 +193,8 @@ class FileTable(ttk.Frame):
         Tooltip(row.variations_entry, lambda: self.tr.t("tip_variations_override"))
         row.output_label = ttk.Label(self.inner, text="", background=NORMAL_BG, foreground="#52514e")
         Tooltip(row.output_label, lambda: "\n".join(p.name for p in (row.validation.output_paths if row.validation else [])))
-        row.status_label = tk.Label(self.inner, text="", background=NORMAL_BG, anchor="w", font=("Segoe UI", 9, "bold"))
+        row.status_label = tk.Label(self.inner, text="", background=NORMAL_BG, anchor="w",
+                                    font=self.tr.font(9, emphasis=True))
         Tooltip(row.status_label, lambda: self.tooltip_for(row.validation))
         row.progress_label = ttk.Label(self.inner, text="", background=NORMAL_BG)
         Tooltip(row.progress_label, lambda: row.progress_detail)
@@ -248,6 +249,7 @@ class FileTable(ttk.Frame):
 
     def show_validation(self, row: Row, validation: batch.Validation | None) -> None:
         row.validation = validation
+        row.status_label.configure(font=self.tr.font(9, emphasis=True))  # bold in English only
         if validation is None:
             row.status_label.configure(text="-", foreground="gray")
             row.output_label.configure(text="")

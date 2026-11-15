@@ -39,7 +39,7 @@ class PlaybackPanel(ttk.LabelFrame):
         self.preview_data = None
         self.preview_result: pipeline.ProcessResult | None = None
         self.status_var = tk.StringVar()
-        self._status: tuple[str, dict] = ("playback_hint", {})
+        self._status: tuple[str, dict] | None = None  # empty until an output is selected
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -77,7 +77,7 @@ class PlaybackPanel(ttk.LabelFrame):
         self.loop_button.configure(text=self.tr.t("play_loop_point"))
         self.folder_button.configure(text=self.tr.t("open_output_folder"))
         self._refresh_play_button()
-        self._set_status(*self._status)
+        self._set_status(*(self._status or (None,)))
         # Re-render the list texts, keeping the selection.
         selection = self.output_list.curselection()
         self.output_list.delete(0, tk.END)
@@ -86,9 +86,10 @@ class PlaybackPanel(ttk.LabelFrame):
         for index in selection:
             self.output_list.selection_set(index)
 
-    def _set_status(self, key: str, params: dict) -> None:
-        self._status = (key, params)
-        self.status_var.set(self.tr.t(key, **params))
+    def _set_status(self, key: str | None, params: dict | None = None) -> None:
+        """Status line under the waveform; ``None`` clears it."""
+        self._status = (key, params or {}) if key else None
+        self.status_var.set(self.tr.t(key, **(params or {})) if key else "")
 
     # ------------------------------------------------------------- list
 
@@ -117,7 +118,7 @@ class PlaybackPanel(ttk.LabelFrame):
         self.output_list.delete(0, tk.END)
         self.preview_data = None
         self.preview_result = None
-        self._set_status("playback_hint", {})
+        self._set_status(None)
         self._draw_waveform()
         self._refresh_play_button()
 

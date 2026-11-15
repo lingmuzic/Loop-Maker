@@ -24,6 +24,13 @@ from pathlib import Path
 EN, ZH_TW = "en", "zh_TW"
 LANGUAGES = {EN: "English", ZH_TW: "繁體中文"}
 
+LATIN_FAMILY = "Segoe UI"
+CJK_FAMILY = "Microsoft JhengHei UI"  # ships with Windows 10/11; Tk falls back if missing
+
+#: Tk's named fonts used by every standard widget.
+TK_NAMED_FONTS = ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkCaptionFont",
+                  "TkSmallCaptionFont", "TkIconFont", "TkTooltipFont")
+
 # --------------------------------------------------------------------------
 # UI strings. Keys are stable identifiers; {placeholders} use str.format.
 # --------------------------------------------------------------------------
@@ -36,7 +43,7 @@ STRINGS: dict[str, dict[str, str]] = {
     },
     "settings_frame": {EN: "Global settings", ZH_TW: "全域設定"},
     "playback_frame": {EN: "Test playback", ZH_TW: "試聽"},
-    "log_frame": {EN: "Log / batch report (English)", ZH_TW: "記錄／批次報告（英文）"},
+    "log_frame": {EN: "Log / batch report", ZH_TW: "記錄／批次報告"},
     "language": {EN: "Language", ZH_TW: "語言"},
     # file buttons
     "add_files": {EN: "Add files...", ZH_TW: "加入檔案..."},
@@ -124,10 +131,6 @@ STRINGS: dict[str, dict[str, str]] = {
     "stop": {EN: "Stop  (Space)", ZH_TW: "停止（空白鍵）"},
     "play_loop_point": {EN: "Play loop point", ZH_TW: "播放循環點"},
     "open_output_folder": {EN: "Open output folder", ZH_TW: "開啟輸出資料夾"},
-    "playback_hint": {
-        EN: "Process some files, then pick an output to audition it.",
-        ZH_TW: "處理檔案後，從清單選一個輸出來試聽。",
-    },
     "playback_status": {
         EN: "{name}  |  {seconds:.2f} s  |  click the waveform to play from there, Space = play/stop, orange = crossfade",
         ZH_TW: "{name}  |  {seconds:.2f} 秒  |  點波形從該處播放，空白鍵 = 播放／停止，橘色 = crossfade",
@@ -164,6 +167,18 @@ class Translator:
 
     def __init__(self, language: str = EN) -> None:
         self.language = language if language in LANGUAGES else EN
+
+    @property
+    def family(self) -> str:
+        """UI font family. Chinese uses Microsoft JhengHei UI explicitly: leaving the
+        CJK glyphs to Windows' font fallback from Segoe UI renders them heavy."""
+        return CJK_FAMILY if self.language == ZH_TW else LATIN_FAMILY
+
+    def font(self, size: int, emphasis: bool = False) -> tuple:
+        """UI font. Emphasis is bold in English only: the Chinese interface never uses bold."""
+        if emphasis and self.language == EN:
+            return (self.family, size, "bold")
+        return (self.family, size)
 
     def t(self, key: str, **params) -> str:
         entry = STRINGS.get(key)

@@ -28,6 +28,7 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -70,6 +71,10 @@ class LoopMakerApp:
                 root.iconbitmap(default=str(icon))
             except tk.TclError:
                 pass  # cosmetic only
+
+        # Remember Tk's default fonts so switching back to English restores them.
+        self._default_fonts = {name: tkfont.nametofont(name).actual() for name in i18n.TK_NAMED_FONTS}
+        self._apply_language_fonts()
 
         self.presets, preset_warnings = presets.load_presets()
         self._create_variables()
@@ -118,6 +123,16 @@ class LoopMakerApp:
     def _display(self, kind: str, internal: str) -> str:
         return dict(self._choices(kind)).get(internal, internal)
 
+    def _apply_language_fonts(self) -> None:
+        """Chinese: every standard widget uses Microsoft JhengHei UI, regular weight
+        (no bold anywhere). English: Tk's original fonts."""
+        for name, original in self._default_fonts.items():
+            font = tkfont.nametofont(name)
+            if self.tr.language == i18n.ZH_TW:
+                font.configure(family=i18n.CJK_FAMILY, weight="normal")
+            else:
+                font.configure(family=original["family"], weight=original["weight"])
+
     def _set_language(self, language: str) -> None:
         if language == self.tr.language:
             return
@@ -126,6 +141,7 @@ class LoopMakerApp:
         values = {kind: self._internal(kind, var) for kind, var in kinds.items()}
         self.tr.language = language
         i18n.save_language(language)
+        self._apply_language_fonts()
 
         self._syncing = True  # the settings themselves do not change
         try:
@@ -139,6 +155,7 @@ class LoopMakerApp:
             box.configure(values=[display for _, display in self._choices(kind)])
         running = self.worker is not None and self.worker.is_alive()
         self.process_button.configure(text=self.tr.t("processing" if running else "process"))
+        self.summary_label.configure(font=self.tr.font(10, emphasis=True))  # no bold in Chinese
         self.table.retranslate()
         self.playback.retranslate()
         self._validate_now()
@@ -294,7 +311,7 @@ class LoopMakerApp:
         bar = ttk.Frame(self.root)
         bar.grid(row=row, column=0, sticky="ew", **pad)
         bar.columnconfigure(0, weight=1)
-        self.summary_label = ttk.Label(bar, textvariable=self.summary_var, font=("Segoe UI", 10, "bold"))
+        self.summary_label = ttk.Label(bar, textvariable=self.summary_var, font=self.tr.font(10, emphasis=True))
         self.summary_label.grid(row=0, column=0, sticky="w")
         self.process_button = self._text(ttk.Button(bar, command=self._start_processing, width=16), "process")
         self.process_button.grid(row=0, column=1, padx=4)

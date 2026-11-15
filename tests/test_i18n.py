@@ -147,10 +147,17 @@ def test_gui_switches_language_without_changing_settings(tmp_path, monkeypatch):
         app._validate_now()
         assert app.process_button["text"] == "Process"
         assert app.table.rows[0].status_label["text"] == "warning"
+        # Header bar never bold; status and summary bold in English only.
+        assert all("bold" not in str(header["font"]) for header, _ in app.table.headers)
+        assert "bold" in str(app.table.rows[0].status_label["font"])
+        assert app.playback.status_var.get() == ""  # no hint line before anything is selected
 
         app._set_language(i18n.ZH_TW)
         assert app.process_button["text"] == "開始處理"
         assert app.table.rows[0].status_label["text"] == "警告"
+        # The Chinese interface uses no bold at all.
+        assert "bold" not in str(app.table.rows[0].status_label["font"])
+        assert "bold" not in str(app.summary_label["font"])
         assert app._policy() == "clamp" and app.policy_var.get() == "自動修正"
         assert app._internal("variations", app.variations_var) == "3"
         assert app._current_output_spec().sample_rate is None  # "沿用來源" still means source
