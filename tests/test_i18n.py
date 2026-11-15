@@ -151,6 +151,10 @@ def test_gui_switches_language_without_changing_settings(tmp_path, monkeypatch):
         assert all("bold" not in str(header["font"]) for header, _ in app.table.headers)
         assert "bold" in str(app.table.rows[0].status_label["font"])
         assert app.playback.status_var.get() == ""  # no hint line before anything is selected
+        # The language box (and its drop-down list) shows 繁體中文 in the CJK font even in English mode.
+        assert i18n.CJK_FAMILY in str(app.language_box["font"])
+        popdown = app.language_box.tk.call("ttk::combobox::PopdownWindow", app.language_box)
+        assert i18n.CJK_FAMILY in str(app.language_box.tk.call(f"{popdown}.f.l", "cget", "-font"))
 
         app._set_language(i18n.ZH_TW)
         assert app.process_button["text"] == "開始處理"

@@ -318,10 +318,15 @@ class LoopMakerApp:
         self.export_button = self._text(ttk.Button(bar, command=self._export_report, state=tk.DISABLED), "export_report")
         self.export_button.grid(row=0, column=2)
         self._text(ttk.Label(bar), "language").grid(row=0, column=3, padx=(24, 4))
-        language_box = ttk.Combobox(bar, textvariable=self.language_var, values=list(i18n.LANGUAGES.values()),
-                                    state="readonly", width=10)
-        language_box.grid(row=0, column=4)
-        language_box.bind("<<ComboboxSelected>>", lambda _e: self._set_language(
+        # The language names include Chinese, so this box always uses the CJK font
+        # (also in English mode, where Segoe UI's fallback would render 繁體中文 heavy).
+        size = tkfont.nametofont("TkDefaultFont").actual()["size"]
+        self.language_box = ttk.Combobox(bar, textvariable=self.language_var, values=list(i18n.LANGUAGES.values()),
+                                         state="readonly", width=10, font=(i18n.CJK_FAMILY, size))
+        self.language_box.grid(row=0, column=4)
+        popdown = self.language_box.tk.call("ttk::combobox::PopdownWindow", self.language_box)
+        self.language_box.tk.call(f"{popdown}.f.l", "configure", "-font", (i18n.CJK_FAMILY, size))
+        self.language_box.bind("<<ComboboxSelected>>", lambda _e: self._set_language(
             next(code for code, name in i18n.LANGUAGES.items() if name == self.language_var.get())))
 
     def _build_log(self, row: int, pad: dict) -> None:
