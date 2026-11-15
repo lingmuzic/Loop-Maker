@@ -115,10 +115,21 @@ def folder_size_mb(folder: Path) -> float:
     return sum(p.stat().st_size for p in folder.rglob("*") if p.is_file()) / 1e6
 
 
+def remove_work_folder() -> None:
+    """Delete PyInstaller's intermediate folder.
+
+    It contains a half-built "Loop Maker.exe" without ``_internal``, which
+    fails with "Failed to load Python DLL" if someone double-clicks it by
+    mistake. Only dist/ should hold a runnable exe.
+    """
+    shutil.rmtree(WORK / "pyinstaller", ignore_errors=True)
+
+
 if __name__ == "__main__":
     build()
     add_user_files()
     self_test()
     archive = make_zip()
+    remove_work_folder()
     print(f"\nApp folder: {APP_FOLDER} ({folder_size_mb(APP_FOLDER):.0f} MB)")
     print(f"Zip:        {archive} ({archive.stat().st_size / 1e6:.0f} MB)")
