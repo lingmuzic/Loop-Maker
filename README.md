@@ -252,7 +252,7 @@ play on both speakers; files with more channels than the output device are folde
 mono for auditioning only (the written file is untouched). Playback needs the optional
 `sounddevice` package; without it the waveform still works.
 
-**Language.** The **Language / 語言** dropdown next to Process switches the interface
+**Language.** The **Language** dropdown (**語言** in Chinese) next to Process switches the interface
 between **English** and **繁體中文 (Traditional Chinese)** instantly, without a restart and
 without changing any settings. The choice is remembered in
 `%APPDATA%\Loop Maker\settings.json`. On first launch, Windows set to a Traditional Chinese

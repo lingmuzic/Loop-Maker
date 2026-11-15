@@ -37,7 +37,7 @@ STRINGS: dict[str, dict[str, str]] = {
     "settings_frame": {EN: "Global settings", ZH_TW: "全域設定"},
     "playback_frame": {EN: "Test playback", ZH_TW: "試聽"},
     "log_frame": {EN: "Log / batch report (English)", ZH_TW: "記錄／批次報告（英文）"},
-    "language": {EN: "Language / 語言", ZH_TW: "語言 / Language"},
+    "language": {EN: "Language", ZH_TW: "語言"},
     # file buttons
     "add_files": {EN: "Add files...", ZH_TW: "加入檔案..."},
     "add_folder": {EN: "Add folder...", ZH_TW: "加入資料夾..."},
@@ -79,7 +79,7 @@ STRINGS: dict[str, dict[str, str]] = {
     },
     "max_for_all": {EN: "max {value:.2f} s for all {n} file{s}", ZH_TW: "全部 {n} 個檔案最多 {value:.2f} 秒"},
     "max_for_selected": {EN: "max {value:.2f} s for {n} selected", ZH_TW: "勾選的 {n} 個檔案最多 {value:.2f} 秒"},
-    "name_preview": {EN: "File name preview: {name}", ZH_TW: "檔名預覽：{name}"},
+    "name_preview": {EN: "e.g. {name}", ZH_TW: "例如 {name}"},
     # table
     "col_file": {EN: "File", ZH_TW: "檔案"},
     "col_length": {EN: "Length", ZH_TW: "長度"},
