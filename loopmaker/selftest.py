@@ -91,7 +91,16 @@ def run(report_path: Path) -> int:
         root.destroy()
         return f"tkdnd {version}"
 
+    def gui_and_translations():
+        from . import gui  # noqa: F401 - the whole GUI must import inside the bundle
+        from .i18n import EN, ZH_TW, Translator
+        zh, en = Translator(ZH_TW).t("process"), Translator(EN).t("process")
+        if zh != "開始處理" or en != "Process":
+            raise RuntimeError(f"unexpected translations: {zh!r} / {en!r}")
+        return f"GUI imports; {en} / {zh}"
+
     check("libsndfile read/write", libsndfile)
+    check("GUI module + translations", gui_and_translations)
     check("presets.json", presets_file)
     check("full batch (resample 44.1->48k, 3 variations, loudness, dither)", full_batch)
     check("tkinter + drag-and-drop", tk_dnd)
