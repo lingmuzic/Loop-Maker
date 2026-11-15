@@ -482,11 +482,6 @@ class LoopMakerApp:
             self._update_process_button()
             return
 
-        warnings = settings.naming.warnings()
-        self.template_hint.configure(foreground=STATUS_COLOURS[batch.WARNING] if warnings else "gray")
-        example = settings.naming.render("Example Recording", 1) + audio_io.EXTENSIONS[settings.output.file_format]
-        self.template_hint_var.set(self.tr.message(warnings[0]) if warnings else self.tr.t("example_name", name=example))
-
         for row in rows:
             row.parse_overrides()
         self.validations = batch.validate_batch([row.job for row in rows], settings, self._policy())
@@ -496,11 +491,31 @@ class LoopMakerApp:
                 validation.status = batch.ERROR
                 validation.output_paths = []
             self.table.show_validation(row, validation)
+        self._update_name_preview(settings)
 
         self.summary_label.configure(foreground="")
         self.summary_var.set(self._summary(self.validations) if rows else self.tr.t("add_files_to_begin"))
         self._update_max_crossfade()
         self._update_process_button()
+
+    def _update_name_preview(self, settings: pipeline.LoopSettings) -> None:
+        """Show the file name the template produces next to the template field.
+
+        Uses the first file in the table that can be processed (its real
+        output name, variations included); with no such file, an example name.
+        """
+        warnings = settings.naming.warnings()
+        if warnings:
+            self.template_hint.configure(foreground=STATUS_COLOURS[batch.WARNING])
+            self.template_hint_var.set(self.tr.message(warnings[0]))
+            return
+        planned = next((v.output_paths for v in self.validations if v.output_paths), None)
+        if planned:
+            name = planned[0].name + (f"  (+{len(planned) - 1})" if len(planned) > 1 else "")
+        else:
+            name = settings.naming.render("Example Recording", 1) + audio_io.EXTENSIONS[settings.output.file_format]
+        self.template_hint.configure(foreground="gray")
+        self.template_hint_var.set(self.tr.t("name_preview", name=name))
 
     def _update_max_crossfade(self) -> None:
         selected = [row.validation for row in self.table.selected_rows() if row.validation]

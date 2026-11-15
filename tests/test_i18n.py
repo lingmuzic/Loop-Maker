@@ -137,6 +137,8 @@ def test_gui_switches_language_without_changing_settings(tmp_path, monkeypatch):
     root.withdraw()
     try:
         app = gui.LoopMakerApp(root, language=i18n.EN)
+        app._validate_now()
+        assert app.template_hint_var.get() == "File name preview: Example Recording_loop.wav"  # no files yet
         app._add_paths([str(make(tmp_path / "Rain_short.wav", 2))])
         app.crossfade_var.set("3")
         app.variations_var.set("3")
@@ -155,6 +157,8 @@ def test_gui_switches_language_without_changing_settings(tmp_path, monkeypatch):
         tooltip = app.table.tooltip_for(app.table.rows[0].validation)
         assert "自動修正" in tooltip and "秒" in tooltip
         assert app.summary_var.get().startswith("1 個檔案")
+        # Preview shows the real first output name (3 variations -> "+2" more).
+        assert app.template_hint_var.get() == "檔名預覽：Rain_short_loop_v01.wav  (+2)"
         assert i18n.load_language(tmp_path / "settings.json") == i18n.ZH_TW  # remembered
 
         app._set_language(i18n.EN)

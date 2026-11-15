@@ -79,7 +79,7 @@ STRINGS: dict[str, dict[str, str]] = {
     },
     "max_for_all": {EN: "max {value:.2f} s for all {n} file{s}", ZH_TW: "全部 {n} 個檔案最多 {value:.2f} 秒"},
     "max_for_selected": {EN: "max {value:.2f} s for {n} selected", ZH_TW: "勾選的 {n} 個檔案最多 {value:.2f} 秒"},
-    "example_name": {EN: "e.g. {name}", ZH_TW: "例如 {name}"},
+    "name_preview": {EN: "File name preview: {name}", ZH_TW: "檔名預覽：{name}"},
     # table
     "col_file": {EN: "File", ZH_TW: "檔案"},
     "col_length": {EN: "Length", ZH_TW: "長度"},
