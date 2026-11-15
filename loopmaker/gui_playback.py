@@ -1,7 +1,7 @@
 """The GUI's "Test playback" panel: output list, waveform and loop audition.
 
 Waveform peaks and the looping player live in ``preview`` (UI-free); this
-module only draws and wires up the widgets.
+module only draws and wires up the widgets. Texts go through ``i18n``.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from tkinter import messagebox, ttk
 from typing import Callable
 
 from . import APP_NAME, pipeline, preview
+from .i18n import Translator
 
 # Waveform colours (light surface, blue wave, orange crossfade highlight).
 WAVE_BG = "#fcfcfb"
@@ -29,14 +30,16 @@ LOOP_POINT_PREROLL_S = 2.0  # "Play loop point" starts this long before the wrap
 class PlaybackPanel(ttk.LabelFrame):
     """Lists written outputs; select one to see its waveform and loop it."""
 
-    def __init__(self, master: tk.Widget, output_folder: Callable[[], Path]) -> None:
-        super().__init__(master, text="Test playback")
+    def __init__(self, master: tk.Widget, tr: Translator, output_folder: Callable[[], Path]) -> None:
+        super().__init__(master)
+        self.tr = tr
         self.output_folder = output_folder
         self.results: list[pipeline.ProcessResult] = []
         self.player = preview.LoopPlayer()
         self.preview_data = None
         self.preview_result: pipeline.ProcessResult | None = None
-        self.status_var = tk.StringVar(value="Process some files, then pick an output to audition it.")
+        self.status_var = tk.StringVar()
+        self._status: tuple[str, dict] = ("playback_hint", {})
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -47,10 +50,12 @@ class PlaybackPanel(ttk.LabelFrame):
 
         buttons = ttk.Frame(self)
         buttons.grid(row=0, column=1, sticky="n", padx=6, pady=6)
-        self.play_button = ttk.Button(buttons, text="Play  (Space)", command=self.toggle)
+        self.play_button = ttk.Button(buttons, command=self.toggle)
         self.play_button.pack(fill=tk.X, pady=2)
-        ttk.Button(buttons, text="Play loop point", command=self._play_loop_point).pack(fill=tk.X, pady=2)
-        ttk.Button(buttons, text="Open output folder", command=self._open_output_folder).pack(fill=tk.X, pady=2)
+        self.loop_button = ttk.Button(buttons, command=self._play_loop_point)
+        self.loop_button.pack(fill=tk.X, pady=2)
+        self.folder_button = ttk.Button(buttons, command=self._open_output_folder)
+        self.folder_button.pack(fill=tk.X, pady=2)
 
         # Waveform: click to play from that point.
         self.wave = tk.Canvas(self, height=110, background=WAVE_BG, highlightthickness=1,
@@ -62,21 +67,46 @@ class PlaybackPanel(ttk.LabelFrame):
         ttk.Label(self, textvariable=self.status_var, foreground="gray").grid(
             row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 6)
         )
+        self.retranslate()
         self.after(PLAYHEAD_REFRESH_MS, self._update_playhead)
+
+    # --------------------------------------------------------- language
+
+    def retranslate(self) -> None:
+        self.configure(text=self.tr.t("playback_frame"))
+        self.loop_button.configure(text=self.tr.t("play_loop_point"))
+        self.folder_button.configure(text=self.tr.t("open_output_folder"))
+        self._refresh_play_button()
+        self._set_status(*self._status)
+        # Re-render the list texts, keeping the selection.
+        selection = self.output_list.curselection()
+        self.output_list.delete(0, tk.END)
+        for result in self.results:
+            self._insert(result)
+        for index in selection:
+            self.output_list.selection_set(index)
+
+    def _set_status(self, key: str, params: dict) -> None:
+        self._status = (key, params)
+        self.status_var.set(self.tr.t(key, **params))
 
     # ------------------------------------------------------------- list
 
     def add_output(self, result: pipeline.ProcessResult) -> None:
         self.results.append(result)
-        verdict = "SMOOTH" if result.quality.after.is_smooth else "CHECK BY EAR"
+        self._insert(result)
+
+    def _insert(self, result: pipeline.ProcessResult) -> None:
+        tr = self.tr
+        verdict = tr.t("smooth") if result.quality.after.is_smooth else tr.t("check_by_ear")
         parts = [result.output_path.name, f"{result.output_seconds:.2f} s", verdict,
-                 f"seam {result.seam_score}", result.curve]
+                 tr.t("seam", score=result.seam_score), result.curve]
         norm = result.normalization
         if norm is not None:
             parts.append(f"{norm.final_lufs:.1f} LUFS")
             if norm.limited_by_peak:
                 # Make it obvious without digging through the log.
-                parts.append(f"PEAK-LIMITED ({norm.shortfall_db:.1f} dB short of {norm.target_lufs:g})")
+                parts.append(tr.t("peak_limited", short=norm.shortfall_db, target=norm.target_lufs))
         self.output_list.insert(tk.END, "    ".join(parts))
         if norm is not None and norm.limited_by_peak:
             self.output_list.itemconfigure(tk.END, foreground=PEAK_LIMITED_FG)
@@ -87,6 +117,7 @@ class PlaybackPanel(ttk.LabelFrame):
         self.output_list.delete(0, tk.END)
         self.preview_data = None
         self.preview_result = None
+        self._set_status("playback_hint", {})
         self._draw_waveform()
         self._refresh_play_button()
 
@@ -113,13 +144,13 @@ class PlaybackPanel(ttk.LabelFrame):
         try:
             self.preview_data, sample_rate = preview.load_for_preview(result.output_path)
         except Exception as exc:  # noqa: BLE001 - shown to the user
-            messagebox.showerror(APP_NAME, f"Could not open {result.output_path.name}:\n{exc}")
+            messagebox.showerror(APP_NAME, self.tr.t("dlg_cannot_open", name=result.output_path.name, error=exc))
             return
         self.preview_result = result
         try:
             self.player.load(self.preview_data, sample_rate)
         except preview.PlaybackUnavailable as exc:
-            self.status_var.set(f"Waveform only: {exc}")
+            self._set_status("waveform_only", {"error": exc})
         self._draw_waveform()
         self._refresh_play_button()
 
@@ -153,17 +184,17 @@ class PlaybackPanel(ttk.LabelFrame):
         try:
             self.player.play(start_s)
         except Exception as exc:  # noqa: BLE001 - e.g. device busy / unsupported rate
-            messagebox.showerror(APP_NAME, f"Playback failed:\n{exc}")
+            messagebox.showerror(APP_NAME, self.tr.t("dlg_playback_failed", error=exc))
 
     def _refresh_play_button(self) -> None:
-        self.play_button.configure(text="Stop  (Space)" if self.player.is_playing else "Play  (Space)")
+        self.play_button.configure(text=self.tr.t("stop" if self.player.is_playing else "play"))
 
     def _open_output_folder(self) -> None:
         folder = self.output_folder()
         if folder.is_dir():
             os.startfile(folder)  # Windows: open in Explorer
         else:
-            messagebox.showinfo(APP_NAME, f"The output folder does not exist yet:\n{folder}")
+            messagebox.showinfo(APP_NAME, self.tr.t("dlg_no_output_folder", folder=folder))
 
     def close(self) -> None:
         self.player.close()
@@ -199,10 +230,7 @@ class PlaybackPanel(ttk.LabelFrame):
         canvas.create_line(0, 0, 0, height, fill=PLAYHEAD, width=2, tags="playhead")
         self._move_playhead()
         if result is not None:
-            self.status_var.set(
-                f"{result.output_path.name}  |  {result.output_seconds:.2f} s  |  click the waveform to play "
-                f"from there, Space = play/stop, orange = crossfade"
-            )
+            self._set_status("playback_status", {"name": result.output_path.name, "seconds": result.output_seconds})
 
     def _move_playhead(self) -> None:
         width, height = self.wave.winfo_width(), self.wave.winfo_height()

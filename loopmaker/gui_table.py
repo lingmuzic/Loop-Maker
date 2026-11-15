@@ -8,7 +8,7 @@
   setting. A filled-in (overridden) cell is highlighted; an unparsable one
   is shown in red and reported as a row error.
 * Status is OK / warning / error, coloured, with a tooltip that explains
-  every problem.
+  every problem (translated through ``i18n``).
 * The checkbox selects rows for "Remove selected" and for the "max
   crossfade" hint next to the global crossfade field.
 
@@ -26,13 +26,15 @@ from typing import Callable
 
 from . import batch
 from . import variations as variations_mod
+from .i18n import Translator
 
 STATUS_COLOURS = {batch.OK: "#0a7d0a", batch.WARNING: "#b4580f", batch.ERROR: "#d03b3b"}
 OVERRIDE_BG = "#fff3c4"   # highlighted (overridden) cell
 INVALID_BG = "#f8d7d7"    # unparsable override
 NORMAL_BG = "white"
 
-COLUMNS = ("", "File", "Length", "Format", "Crossfade", "Var.", "Output", "Status", "Progress")
+COLUMN_KEYS = ("", "col_file", "col_length", "col_format", "col_crossfade", "col_var",
+               "col_output", "col_status", "col_progress")
 
 
 class Tooltip:
@@ -71,16 +73,18 @@ class Row:
     variations: tk.StringVar
     widgets: list[tk.Widget] = field(default_factory=list)
     status_label: tk.Label | None = None
+    format_label: ttk.Label | None = None
     output_label: ttk.Label | None = None
     progress_label: ttk.Label | None = None
     crossfade_entry: tk.Entry | None = None
     variations_entry: tk.Entry | None = None
     validation: batch.Validation | None = None
+    progress: tuple[str, dict] | None = None   # (i18n key, params), re-rendered on language change
     progress_detail: str = ""
     override_errors: list[str] = field(default_factory=list)
 
     def parse_overrides(self) -> None:
-        """Copy the override cells into the job; collect parse problems."""
+        """Copy the override cells into the job; collect parse problems (English, translated on display)."""
         self.override_errors = []
         text = self.crossfade.get().strip()
         if not text:
@@ -94,7 +98,7 @@ class Row:
         text = self.variations.get().strip().lower()
         if not text:
             self.job.variations = None
-        elif text in ("off", "0"):
+        elif text in ("off", "0", "關閉"):
             self.job.variations = 0
         elif text in {str(n) for n in variations_mod.VARIATION_COUNTS}:
             self.job.variations = int(text)
@@ -114,10 +118,12 @@ class Row:
 class FileTable(ttk.Frame):
     """Scrollable table of FileJobs. ``on_change`` fires when overrides/selection change."""
 
-    def __init__(self, master: tk.Widget, on_change: Callable[[], None]) -> None:
+    def __init__(self, master: tk.Widget, tr: Translator, on_change: Callable[[], None]) -> None:
         super().__init__(master)
+        self.tr = tr
         self.on_change = on_change
         self.rows: list[Row] = []
+        self.dnd_available = True
 
         self.canvas = tk.Canvas(self, highlightthickness=0, background=NORMAL_BG, height=150)
         scroll = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.canvas.yview)
@@ -135,15 +141,38 @@ class FileTable(ttk.Frame):
             widget.bind("<Enter>", lambda _e: self.canvas.bind_all("<MouseWheel>", self._on_wheel))
             widget.bind("<Leave>", lambda _e: self.canvas.unbind_all("<MouseWheel>"))
 
-        for col, title in enumerate(COLUMNS):
-            tk.Label(self.inner, text=title, background="#ecebe7", anchor="w", padx=4,
-                     font=("Segoe UI", 9, "bold")).grid(row=0, column=col, sticky="ew")
+        self.headers = []
+        for col, key in enumerate(COLUMN_KEYS):
+            header = tk.Label(self.inner, background="#ecebe7", anchor="w", padx=4, font=("Segoe UI", 9, "bold"))
+            header.grid(row=0, column=col, sticky="ew")
+            self.headers.append((header, key))
         self.inner.columnconfigure(1, weight=2)  # file name
         self.inner.columnconfigure(6, weight=3)  # output names
 
-        self.empty_hint = tk.Label(self.inner, text="Drag and drop audio files or folders here, or use Add files...",
-                                   foreground="gray", background=NORMAL_BG, pady=16)
-        self.empty_hint.grid(row=1, column=0, columnspan=len(COLUMNS))
+        self.empty_hint = tk.Label(self.inner, foreground="gray", background=NORMAL_BG, pady=16)
+        self.empty_hint.grid(row=1, column=0, columnspan=len(COLUMN_KEYS))
+        self.retranslate()
+
+    # ------------------------------------------------------------ language
+
+    def retranslate(self) -> None:
+        """Re-render every translated text (after a language change)."""
+        for header, key in self.headers:
+            header.configure(text=self.tr.t(key) if key else "")
+        self.empty_hint.configure(text=self.tr.t("table_empty" if self.dnd_available else "table_empty_no_dnd"))
+        for row in self.rows:
+            self._render_format(row)
+            self.show_validation(row, row.validation)
+            self._render_progress(row)
+
+    def tooltip_for(self, validation: batch.Validation | None) -> str:
+        if validation is None:
+            return ""
+        tr = self.tr
+        lines = [tr.t("tip_error", msg=tr.message(e)) for e in validation.errors]
+        lines += [tr.t("tip_warning", msg=tr.message(w)) for w in validation.warnings]
+        lines += [tr.t("tip_clamp", msg=tr.message(c)) for c in validation.changes]
+        return "\n".join(lines) or "OK"
 
     # ------------------------------------------------------------ rows
 
@@ -153,32 +182,38 @@ class FileTable(ttk.Frame):
         r = len(self.rows) + 1
         info = job.info()
         length = f"{info.duration_s:.1f} s" if info else "?"
-        fmt = (f"{info.sample_rate / 1000:g} kHz {info.channels} ch {info.subtype.replace('PCM_', '')}"
-               if info else "unreadable")
 
         check = tk.Checkbutton(self.inner, variable=row.selected, background=NORMAL_BG, command=self.on_change)
         name = ttk.Label(self.inner, text=job.path.name, background=NORMAL_BG)
         Tooltip(name, lambda: str(job.path))
+        row.format_label = ttk.Label(self.inner, background=NORMAL_BG)
         row.crossfade_entry = tk.Entry(self.inner, textvariable=row.crossfade, width=6, background=NORMAL_BG)
         row.variations_entry = tk.Entry(self.inner, textvariable=row.variations, width=4, background=NORMAL_BG)
-        Tooltip(row.crossfade_entry, lambda: "Per-file crossfade in seconds (empty = global setting)")
-        Tooltip(row.variations_entry, lambda: "Per-file variations: off, 3, 4 or 5 (empty = global setting)")
+        Tooltip(row.crossfade_entry, lambda: self.tr.t("tip_crossfade_override"))
+        Tooltip(row.variations_entry, lambda: self.tr.t("tip_variations_override"))
         row.output_label = ttk.Label(self.inner, text="", background=NORMAL_BG, foreground="#52514e")
         Tooltip(row.output_label, lambda: "\n".join(p.name for p in (row.validation.output_paths if row.validation else [])))
         row.status_label = tk.Label(self.inner, text="", background=NORMAL_BG, anchor="w", font=("Segoe UI", 9, "bold"))
-        Tooltip(row.status_label, lambda: row.validation.tooltip if row.validation else "")
+        Tooltip(row.status_label, lambda: self.tooltip_for(row.validation))
         row.progress_label = ttk.Label(self.inner, text="", background=NORMAL_BG)
         Tooltip(row.progress_label, lambda: row.progress_detail)
 
         row.widgets = [check, name, ttk.Label(self.inner, text=length, background=NORMAL_BG),
-                       ttk.Label(self.inner, text=fmt, background=NORMAL_BG), row.crossfade_entry,
-                       row.variations_entry, row.output_label, row.status_label, row.progress_label]
+                       row.format_label, row.crossfade_entry, row.variations_entry, row.output_label,
+                       row.status_label, row.progress_label]
         for col, widget in enumerate(row.widgets):
             widget.grid(row=r, column=col, sticky="w" if col not in (1, 6) else "ew", padx=3, pady=1)
         for var in (row.crossfade, row.variations):
             var.trace_add("write", lambda *_: self.on_change())
         self.rows.append(row)
+        self._render_format(row)
         self.empty_hint.grid_remove()
+
+    def _render_format(self, row: Row) -> None:
+        info = row.job.info()
+        text = (f"{info.sample_rate / 1000:g} kHz {info.channels} ch {info.subtype.replace('PCM_', '')}"
+                if info else self.tr.t("unreadable"))
+        row.format_label.configure(text=text)
 
     def remove_selected(self) -> int:
         keep = [row for row in self.rows if not row.selected.get()]
@@ -217,15 +252,26 @@ class FileTable(ttk.Frame):
             row.status_label.configure(text="-", foreground="gray")
             row.output_label.configure(text="")
             return
-        row.status_label.configure(text=validation.status, foreground=STATUS_COLOURS[validation.status])
+        row.status_label.configure(text=self.tr.t(f"status_{validation.status}"),
+                                   foreground=STATUS_COLOURS[validation.status])
         names = [p.name for p in validation.output_paths]
         text = names[0] + (f"  (+{len(names) - 1})" if len(names) > 1 else "") if names else "-"
         row.output_label.configure(text=text)
 
-    def show_progress(self, index: int, text: str, detail: str = "") -> None:
+    def show_progress(self, index: int, key: str | None, detail: str = "", **params) -> None:
+        """Set a row's progress cell from an i18n key (None clears it)."""
         if 0 <= index < len(self.rows):
-            self.rows[index].progress_label.configure(text=text)
-            self.rows[index].progress_detail = detail
+            row = self.rows[index]
+            row.progress = (key, params) if key else None
+            row.progress_detail = detail
+            self._render_progress(row)
+
+    def _render_progress(self, row: Row) -> None:
+        if row.progress is None:
+            row.progress_label.configure(text="")
+        else:
+            key, params = row.progress
+            row.progress_label.configure(text=self.tr.t(key, **params))
 
     def _on_wheel(self, event) -> None:
         self.canvas.yview_scroll(int(-event.delta / 120), "units")

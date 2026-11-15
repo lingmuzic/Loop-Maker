@@ -2,6 +2,10 @@
 
 > 在 AI 協助下製作：工具設計與演算法需求來自我自己的音效設計工作流程，程式碼由 Claude Code 在我的指示下撰寫。詳見[致謝](#致謝)。
 
+**[⬇ 下載 Windows 版](../../releases/latest)**：不需要安裝 Python。解壓縮後執行 `Loop Maker.exe` 即可。第一次開啟時若出現 Windows SmartScreen 警告，請點「其他資訊」→「仍要執行」。
+
+[English](README.md) | 繁體中文
+
 把環境音（ambience）錄音變成**無縫可循環**的音檔。做法和音效設計師在 DAW 裡手動處理一樣，但可以批次處理，還附品質檢查。
 
 ![Before/after waveform](docs/before_after.png)
@@ -185,6 +189,12 @@ python -m loopmaker "D:\Recordings\Ambience"
 | **Open output folder** | 在檔案總管中顯示檔案 |
 
 播放時會從最後一個取樣直接繞回第一個，和遊戲引擎的循環聲音一模一樣，所以你聽到的是對循環點的真實測試。單聲道檔案會從兩個喇叭播放；聲道數多於輸出裝置的檔案，只在試聽時混成單聲道（寫出的檔案不受影響）。播放需要選用的 `sounddevice` 套件；沒有它的話波形仍可使用。
+
+**語言。**「開始處理」按鈕旁的 **Language / 語言** 下拉選單可以在 **English** 和**繁體中文**之間切換，介面會立即更新，不需要重開程式，設定也不會改變。選擇會記在 `%APPDATA%\Loop Maker\settings.json`。第一次開啟時，如果 Windows 的顯示語言是繁體中文（zh-TW／zh-HK／zh-MO）就預設中文，其他語言則預設英文。
+
+- 檢查訊息（狀態欄的 tooltip、摘要列、設定問題）由不含 UI 的核心模組以英文產生，再由 `loopmaker/i18n.py` 的對照表翻成中文顯示，核心模組因此不需要處理語言。有一個測試會產生每一種核心訊息，只要有任何一種沒有中文翻譯，測試就會失敗。對照表裡沒有的訊息會直接顯示英文，不會出錯。
+- **記錄區和匯出的批次報告刻意維持英文**：和 CLI 的輸出一致，方便分享給團隊。
+- 技術名稱兩種語言都維持原文：曲線名稱（`auto`、`equal_power`、`linear`）、預設名稱、*Crossfade*、*Variations*、LUFS／dBTP。
 
 ### 作為函式庫
 
@@ -377,6 +387,7 @@ loopmaker/
   gui_playback.py  Test playback 面板：輸出清單、波形、試聽
   paths.py      應用程式資料夾／內含資源，從原始碼或 .exe 執行皆可
   selftest.py   所有內含元件的自我測試 (--selftest)
+  i18n.py       GUI 翻譯（英文／繁體中文）
 assets/         應用程式圖示（由 scripts/make_icon.py 產生）
 tests/          使用合成雜訊與正弦訊號的 pytest 測試
 scripts/        README 圖表、圖示產生器、exe 進入點與建置腳本

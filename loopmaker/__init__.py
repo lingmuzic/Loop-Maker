@@ -15,4 +15,4 @@ The display name is "Loop Maker"; the Python package/command stays
 """
 
 APP_NAME = "Loop Maker"
-__version__ = "0.3.0"
+__version__ = "0.4.0"
